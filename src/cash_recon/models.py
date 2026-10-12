@@ -59,6 +59,15 @@ class PackStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class ReturnReason(str, Enum):
+    """Why the bank took cash back, as stated on the return advice."""
+
+    NSF = "NSF"  # the payer's account held insufficient funds
+    ACCOUNT_CLOSED = "ACCOUNT_CLOSED"
+    STOP_PAYMENT = "STOP_PAYMENT"
+    RECALL = "RECALL"  # the sending bank recalled the wire
+
+
 # ---------------------------------------------------------------- inputs
 
 
@@ -114,6 +123,7 @@ class BankLine(BaseModel):
     payer_name: str  # who the bank says sent it
     reference: str | None  # remittance reference / policy no., if stated
     narrative: str = ""  # free bank text, untrusted
+    resend_of: str | None = None  # a returned line this payment re-sends, if any
 
 
 class RemittanceLine(BaseModel):
@@ -198,6 +208,10 @@ class PostingPack(BaseModel):
     status: PackStatus = PackStatus.PROPOSED
     approvals: list[str] = Field(default_factory=list)  # approver names
     decided_at: datetime | None = None
+    # Markers about the pack, never edits to it: a flag (e.g.
+    # RETURN_AFFECTED) annotates the record; the entries — the body
+    # a human approved — are never rewritten after the fact.
+    flags: list[str] = Field(default_factory=list)
 
     @property
     def allocation_total(self) -> Decimal:
@@ -212,6 +226,27 @@ class PostingPack(BaseModel):
             (e.write_off_amount or Decimal("0.00") for e in self.entries),
             Decimal("0.00"),
         )
+
+
+class PaymentReturn(BaseModel):
+    """A bank return advice worked against an applied bank line.
+
+    The bank took the money back (a bounced debit, a recalled wire,
+    a dishonoured cheque). The return is its own record — the
+    original application is never edited away; the reversal is
+    derived from it and chained to it here and on the audit trail.
+    Full-line returns only: the bank returning part of a line is
+    refused at recording time, in words, not modelled as a state.
+    """
+
+    return_id: str
+    bank_line_id: str
+    reason: ReturnReason
+    return_date: date
+    recorded_by: str
+    amount: Decimal  # the full bank-line amount, always
+    pack_ids: list[str] = Field(default_factory=list)  # approved packs that carried the line
+    detail: str = ""
 
 
 class AuditEvent(BaseModel):

@@ -20,6 +20,7 @@ from .objects import make_object_store
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
 from .report import broker_scorecard, day_report
+from .returns import ReturnError, line_history, record_return
 from .statement import StatementImportError, import_statement
 from .store import make_store
 
@@ -43,6 +44,15 @@ def main() -> None:
     clo.add_argument("--format", choices=("json", "text"), default="json")
     imp = sub.add_parser("import-statement", help="import a generic bank statement CSV")
     imp.add_argument("path", help="path to the statement CSV")
+    ret = sub.add_parser("return", help="record a bank return against an applied bank line")
+    ret.add_argument("bank_line_id")
+    ret.add_argument("reason", help="NSF | ACCOUNT_CLOSED | STOP_PAYMENT | RECALL")
+    ret.add_argument("--actor", required=True, help="who records the return (a named person)")
+    ret.add_argument("--on", default=None, help="return date YYYY-MM-DD (default today)")
+    ret.add_argument("--amount", default=None,
+                     help="amount the bank returned; anything but the full line amount is refused")
+    hist = sub.add_parser("history", help="one bank line's whole chain: application, return, re-application")
+    hist.add_argument("bank_line_id")
     args = parser.parse_args()
 
     store, objects = make_store(), make_object_store()
@@ -81,6 +91,22 @@ def main() -> None:
         except StatementImportError as exc:
             parser.exit(1, f"import refused: {exc}\n")
         print(json.dumps(report, indent=2))
+    elif args.command == "return":
+        from decimal import Decimal
+
+        try:
+            recorded = record_return(
+                store, args.bank_line_id, args.reason, args.actor,
+                date.fromisoformat(args.on) if args.on else date.today(),
+                amount=Decimal(args.amount) if args.amount else None,
+            )
+        except ReturnError as exc:
+            parser.exit(1, f"return refused: {exc}\n")
+        from .store import dump
+
+        print(json.dumps(json.loads(dump(recorded)), indent=2))
+    elif args.command == "history":
+        print(json.dumps(line_history(store, args.bank_line_id), indent=2))
 
 
 if __name__ == "__main__":

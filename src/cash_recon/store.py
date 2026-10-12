@@ -42,6 +42,7 @@ from .models import (
     BankLine,
     Broker,
     ExceptionRecord,
+    PaymentReturn,
     PostingPack,
     Receivable,
     Remittance,
@@ -84,7 +85,11 @@ class Store(Protocol):
     def receivables(self) -> list[Receivable]: ...
     def receivable(self, policy_number: str) -> Receivable | None: ...
     def add_bank_line(self, line: BankLine) -> None: ...
+    def save_bank_line(self, line: BankLine) -> None: ...
     def bank_lines(self, on: date | None = None) -> list[BankLine]: ...
+    def add_return(self, ret: PaymentReturn) -> None: ...
+    def returns(self, on: date | None = None) -> list[PaymentReturn]: ...
+    def return_for_line(self, bank_line_id: str) -> PaymentReturn | None: ...
     def add_remittance(self, rem: Remittance) -> None: ...
     def save_remittance(self, rem: Remittance) -> None: ...
     def remittances(self, on: date | None = None) -> list[Remittance]: ...
@@ -121,6 +126,7 @@ class InMemoryStore:
         self._exceptions: dict[str, ExceptionRecord] = {}
         self._suspense: dict[str, SuspenseItem] = {}
         self._packs: dict[str, PostingPack] = {}
+        self._returns: dict[str, PaymentReturn] = {}
         self._audit: list[AuditEvent] = []
 
     # -- reference data -------------------------------------------------
@@ -143,9 +149,28 @@ class InMemoryStore:
     def add_bank_line(self, line):
         self._bank_lines[line.bank_line_id] = copy.deepcopy(line)
 
+    def save_bank_line(self, line):
+        self._bank_lines[line.bank_line_id] = copy.deepcopy(line)
+
     def bank_lines(self, on=None):
         rows = copy.deepcopy(list(self._bank_lines.values()))
         return [r for r in rows if on is None or r.value_date == on]
+
+    def add_return(self, ret):
+        self._returns[ret.return_id] = copy.deepcopy(ret)
+
+    def returns(self, on=None):
+        rows = sorted(
+            copy.deepcopy(list(self._returns.values())),
+            key=lambda r: (r.return_date, r.return_id),
+        )
+        return [r for r in rows if on is None or r.return_date == on]
+
+    def return_for_line(self, bank_line_id):
+        for ret in self._returns.values():
+            if ret.bank_line_id == bank_line_id:
+                return copy.deepcopy(ret)
+        return None
 
     def add_remittance(self, rem):
         self._remittances[rem.remittance_id] = copy.deepcopy(rem)
@@ -290,6 +315,14 @@ class PostgresStore:
             (line.bank_line_id, line.value_date, line.amount, dump(line)),
         )
 
+    def save_bank_line(self, line):
+        self._put(
+            "INSERT INTO bank_lines (bank_line_id, value_date, amount, payload) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (bank_line_id) DO UPDATE SET "
+            "value_date = EXCLUDED.value_date, amount = EXCLUDED.amount, payload = EXCLUDED.payload",
+            (line.bank_line_id, line.value_date, line.amount, dump(line)),
+        )
+
     def bank_lines(self, on=None):
         if on is None:
             rows = self._all("SELECT payload FROM bank_lines ORDER BY value_date, bank_line_id")
@@ -298,6 +331,28 @@ class PostgresStore:
                 "SELECT payload FROM bank_lines WHERE value_date = %s ORDER BY bank_line_id", (on,)
             )
         return [BankLine.model_validate(r["payload"]) for r in rows]
+
+    def add_return(self, ret):
+        self._put(
+            "INSERT INTO payment_returns (return_id, bank_line_id, return_date, amount, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (return_id) DO NOTHING",
+            (ret.return_id, ret.bank_line_id, ret.return_date, ret.amount, dump(ret)),
+        )
+
+    def returns(self, on=None):
+        if on is None:
+            rows = self._all("SELECT payload FROM payment_returns ORDER BY return_date, return_id")
+        else:
+            rows = self._all(
+                "SELECT payload FROM payment_returns WHERE return_date = %s ORDER BY return_id", (on,)
+            )
+        return [PaymentReturn.model_validate(r["payload"]) for r in rows]
+
+    def return_for_line(self, bank_line_id):
+        row = self._one(
+            "SELECT payload FROM payment_returns WHERE bank_line_id = %s", (bank_line_id,)
+        )
+        return PaymentReturn.model_validate(row["payload"]) if row else None
 
     def add_remittance(self, rem):
         self._put(
@@ -532,6 +587,14 @@ class SqliteStore:
             (line.bank_line_id, line.value_date.isoformat(), str(line.amount), dump(line)),
         )
 
+    def save_bank_line(self, line):
+        self._put(
+            "INSERT INTO bank_lines (bank_line_id, value_date, amount, payload) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT (bank_line_id) DO UPDATE SET "
+            "value_date = excluded.value_date, amount = excluded.amount, payload = excluded.payload",
+            (line.bank_line_id, line.value_date.isoformat(), str(line.amount), dump(line)),
+        )
+
     def bank_lines(self, on=None):
         if on is None:
             rows = self._all("SELECT payload FROM bank_lines ORDER BY value_date, bank_line_id")
@@ -541,6 +604,29 @@ class SqliteStore:
                 (on.isoformat(),),
             )
         return [BankLine.model_validate(self._payload(r)) for r in rows]
+
+    def add_return(self, ret):
+        self._put(
+            "INSERT OR IGNORE INTO payment_returns (return_id, bank_line_id, return_date, amount, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ret.return_id, ret.bank_line_id, ret.return_date.isoformat(), str(ret.amount), dump(ret)),
+        )
+
+    def returns(self, on=None):
+        if on is None:
+            rows = self._all("SELECT payload FROM payment_returns ORDER BY return_date, return_id")
+        else:
+            rows = self._all(
+                "SELECT payload FROM payment_returns WHERE return_date = ? ORDER BY return_id",
+                (on.isoformat(),),
+            )
+        return [PaymentReturn.model_validate(self._payload(r)) for r in rows]
+
+    def return_for_line(self, bank_line_id):
+        row = self._one(
+            "SELECT payload FROM payment_returns WHERE bank_line_id = ?", (bank_line_id,)
+        )
+        return PaymentReturn.model_validate(self._payload(row)) if row else None
 
     def add_remittance(self, rem):
         self._put(

@@ -24,9 +24,12 @@ from cash_recon.dataset import build_dataset
 from cash_recon.llm import OfflineReader
 from cash_recon.models import (
     AuditEvent,
+    BankLine,
     ExceptionCode,
     ExceptionRecord,
+    PaymentReturn,
     PostingPack,
+    ReturnReason,
     SuspenseItem,
 )
 from cash_recon.objects import InMemoryObjectStore
@@ -101,6 +104,29 @@ def battery(store, tag: str = "") -> None:
     store.save_pack(pack)
     assert store.pack(pack.pack_id).assembled_by == "battery"
     assert pack.pack_id in {p.pack_id for p in store.packs(on=date(2026, 9, 2))}
+
+    # Bank lines: save upserts the record (the re-send link lands
+    # this way) while add stays insert-only.
+    bl = BankLine(bank_line_id=f"BL-{tag}BATTERY", value_date=date(2026, 9, 3),
+                  amount=D("10.00"), payer_name="Battery Payer", reference=None)
+    store.add_bank_line(bl)
+    bl.resend_of = "BL-001"
+    store.save_bank_line(bl)
+    saved = [l for l in store.bank_lines(on=date(2026, 9, 3)) if l.bank_line_id == bl.bank_line_id]
+    assert saved and saved[0].resend_of == "BL-001"
+
+    # Payment returns: recorded, listed by date, found by line.
+    ret = PaymentReturn(
+        return_id=f"RET-{tag}BATTERY", bank_line_id="BL-001", reason=ReturnReason.NSF,
+        return_date=date(2026, 9, 4), recorded_by="battery", amount=D("4800.00"),
+        pack_ids=["PACK-2026-09-02"],
+    )
+    store.add_return(ret)
+    assert store.return_for_line("BL-001").reason == ReturnReason.NSF
+    assert store.return_for_line("BL-002") is None
+    assert ret.return_id in {r.return_id for r in store.returns(on=date(2026, 9, 4))}
+    mine = [r for r in store.returns() if r.return_id == ret.return_id]
+    assert mine and isinstance(mine[0].amount, Decimal)
 
     # Audit: order preserved, subject filter works, timestamps return
     # as datetimes whatever the store keeps underneath.

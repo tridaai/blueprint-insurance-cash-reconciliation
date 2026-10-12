@@ -69,6 +69,18 @@
     <p id="footing" class="note"></p>
     <h3>By broker</h3><div id="bybroker"></div>
     <h3>Re-match recoveries this day</h3><div id="rematchreport"></div>
+    <h3>Payment returns</h3>
+    <p class="note">Cash the bank took back. A return is recorded against an <em>applied</em> bank line: its allocations reverse exactly, the packs that carried it are flagged RETURN_AFFECTED (their entries stand), and any suspense it held is released. Full-line returns only — a part-return is refused, in words. If the payer re-sends, the new line is matched on its own merits and linked to the returned original.</p>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
+      <input type="text" id="return-line" placeholder="Bank line id (e.g. BL-001)" size="18">
+      <select id="return-reason" style="font:inherit; padding:7px 10px; border:1px solid var(--line); border-radius:8px">
+        <option value="NSF">NSF</option><option value="ACCOUNT_CLOSED">Account closed</option>
+        <option value="STOP_PAYMENT">Stop payment</option><option value="RECALL">Recall</option>
+      </select>
+      <button id="return-go" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:#fff; color:var(--accent); cursor:pointer">Record return (on the day above)</button>
+      <span class="note" id="return-status"></span>
+    </div>
+    <div id="returnsreport"></div>
     <h3>Exceptions raised this day</h3><div id="dayexceptions"></div>
   </section>
   <section id="tab-import" class="hidden">
@@ -135,6 +147,8 @@ async function loadReport() {
   const rep = await api(`/api/days/${day}/report`);
   $("cards").innerHTML = [
     ["Bank total", rep.bank_total], ["Allocated", rep.allocated_total],
+    ["Returned (of this day's lines)", rep.returned_total || "0.00"],
+    ["Allocated, net of returns", rep.allocated_net_of_returns || rep.allocated_total],
     ["Posted (approved)", rep.posted_total], ["In suspense", rep.suspense_total],
     ["Bank lines", rep.bank_lines]
   ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${typeof v === "number" ? v : money(v)}</div></div>`).join("");
@@ -147,7 +161,28 @@ async function loadReport() {
     ? table([{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Recovered", num: 1, render: r => money(r.amount)}], rec.items)
       + `<p class="note">${rec.recovered_lines} line(s), ${money(rec.recovered_total)} recovered by the re-match pass — proposed at the gate in a PACK-REMATCH pack.</p>`
     : "<p class='note'>No re-match recoveries on this day.</p>";
+  const rets = rep.returns_recorded || {count: 0, total: "0.00", items: []};
+  $("returnsreport").innerHTML = rets.count
+    ? table([{key: "return_id", label: "Return"}, {key: "bank_line_id", label: "Bank line"},
+             {key: "reason", label: "Reason"}, {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+             {key: "recorded_by", label: "Recorded by"},
+             {label: "Reversing packs", render: r => r.pack_ids.join(", ") || "—"}], rets.items)
+      + `<p class="note">${rets.count} return(s) recorded this day, ${money(rets.total)} taken back by the bank — reversing entries; the original applications stand in their packs, flagged RETURN_AFFECTED.</p>`
+    : "<p class='note'>No returns recorded on this day.</p>";
   $("dayexceptions").innerHTML = exceptionTable(rep.exceptions);
+}
+async function recordReturn() {
+  const line = $("return-line").value.trim();
+  const name = $("actor").value.trim();
+  if (!line) return ($("return-status").textContent = "Enter the bank line id first.");
+  if (!name) return ($("return-status").textContent = "Enter your name first — a return is a named act.");
+  try {
+    const r = await api(`/api/bank-lines/${encodeURIComponent(line)}/returns`, {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({reason: $("return-reason").value, actor: name, on: $("day").value})});
+    $("return-status").textContent = `Recorded ${r.return_id}: ${money(r.amount)} returned (${r.reason}); allocations reversed, packs flagged.`;
+    loadReport(); loadPacks();
+  } catch (e) { $("return-status").textContent = "Return refused: " + e.message; }
 }
 function exceptionTable(rows) {
   return table(
@@ -187,6 +222,9 @@ async function loadClose() {
       {k: "Cash received in month (bank total)", v: roll.cash_received_in_month},
       {k: "Received into suspense", v: roll.received_into_suspense},
       {k: "Applied from suspense", v: roll.applied_from_suspense},
+      {k: "Returned from suspense", v: roll.returned_from_suspense || "0.00"},
+      {k: "Payment returns in month (count)", v: (roll.returns_in_month || {count: 0}).count},
+      {k: "Payment returns in month (total)", v: (roll.returns_in_month || {total: "0.00"}).total},
       {k: "Applied via approved packs", v: roll.applied_allocations_approved},
       {k: "Approved write-offs (receivable deltas)", v: roll.approved_write_offs},
       {k: "Closing suspense", v: roll.closing_suspense},
@@ -195,7 +233,12 @@ async function loadClose() {
     table([{key: "pack_id", label: "Pack"}, {key: "value_date", label: "Value date"},
            {label: "Approved by", render: r => r.approvals.join(", ")},
            {key: "allocation_total", label: "Allocations", num: 1, render: r => money(r.allocation_total)},
-           {key: "write_off_total", label: "Write-offs", num: 1, render: r => money(r.write_off_total)}], p.packs_approved_in_month) +
+           {key: "write_off_total", label: "Write-offs", num: 1, render: r => money(r.write_off_total)},
+           {label: "Flags", render: r => (r.flags || []).join(", ") || "—"}], p.packs_approved_in_month) +
+    ((p.payment_returns_in_month || []).length ? `<h3>Payment returns in the month</h3>` + table(
+      [{key: "return_id", label: "Return"}, {key: "bank_line_id", label: "Bank line"}, {key: "reason", label: "Reason"},
+       {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)}, {key: "return_date", label: "Returned"},
+       {key: "recorded_by", label: "Recorded by"}], p.payment_returns_in_month) : "") +
     `<h3>Exceptions</h3><p class="note">${p.exceptions_opened_in_month.length} opened in the month · ${p.exceptions_closed_by_month_end.length} closed by month end.</p>` +
     exceptionTable(p.exceptions_opened_in_month.map(e => ({...e, code: e.code, status: e.disposition}))) +
     `<h3>Suspense aging at month end</h3>` +
@@ -275,8 +318,8 @@ async function loadPacks() {
          <button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject</button>
          <a href="/api/packs/${p.pack_id}/posting-file">posting file</a>`
       : (p.status === "approved" ? `<a href="/api/packs/${p.pack_id}/posting-file">posting file (CSV)</a>` : "");
-    return `<h3>${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span></h3>
-      <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}. Approvals: ${p.approvals.join(", ") || "—"}</p>
+    return `<h3>${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span>${(p.flags || []).map(f => ` <span class="pill bad">${f}</span>`).join("")}</h3>
+      <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}. Approvals: ${p.approvals.join(", ") || "—"}${(p.flags || []).includes("RETURN_AFFECTED") ? " A line in this pack was returned by the bank; the entries stand as approved and the reversal lives on the return record." : ""}</p>
       <p>${actions}</p>` +
       table([{key: "kind", label: "Kind"},
              {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.write_off_policy || "")},
@@ -310,6 +353,7 @@ async function loadAudit() {
      {key: "subject", label: "Subject"}, {key: "detail", label: "Detail"}], events.slice().reverse());
 }
 const loaders = {report: loadReport, import: () => Promise.resolve(), close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+$("return-go").addEventListener("click", recordReturn);
 $("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
 $("import-go").addEventListener("click", runImport);
 $("import-file").addEventListener("change", async (ev) => {

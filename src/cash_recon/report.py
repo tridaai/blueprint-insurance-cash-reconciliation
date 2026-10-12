@@ -76,6 +76,31 @@ def suspense_aging(store: Store, as_of: date) -> list[dict]:
     return out
 
 
+def returns_view(store: Store, on: date | None = None) -> dict:
+    """Payment returns as a control line: the count and total of the
+    full-line amounts the bank took back. With `on`, only the returns
+    recorded that day — the reversing entries belonging to that day's
+    report. Without it, every return on the books."""
+    rets = store.returns(on=on)
+    return {
+        "count": len(rets),
+        "total": str(sum((r.amount for r in rets), ZERO)),
+        "items": [
+            {
+                "return_id": r.return_id,
+                "bank_line_id": r.bank_line_id,
+                "reason": r.reason.value,
+                "amount": str(r.amount),
+                "return_date": r.return_date.isoformat(),
+                "recorded_by": r.recorded_by,
+                "pack_ids": list(r.pack_ids),
+                "detail": r.detail,
+            }
+            for r in rets
+        ],
+    }
+
+
 def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
     lines = store.bank_lines(on=day)
     packs = store.packs(on=day)
@@ -122,12 +147,22 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
         i for i in store.suspense_items()
         if i.status == "open" and i.age_days(day) > policy.stale_suspense_days
     ]
+    # Returns touch the day two ways, both shown, neither netted
+    # silently: returns RECORDED today (reversing entries belonging
+    # to this report), and returns of lines RECEIVED today, which
+    # restate what today's allocations are worth now.
+    returned_for_lines = sum(
+        (r.amount for r in store.returns() if r.bank_line_id in line_ids), ZERO
+    )
     return {
         "date": day.isoformat(),
         "bank_total": str(bank_total),
         "allocated_total": str(allocated_total),
+        "returned_total": str(returned_for_lines),
+        "allocated_net_of_returns": str(allocated_total - returned_for_lines),
         "posted_total": str(posted_total),
         "suspense_total": str(suspense_total),
+        "returns_recorded": returns_view(store, on=day),
         "bank_lines": len(lines),
         "footing_ok": footing_ok,
         "reconciled": footing_ok,

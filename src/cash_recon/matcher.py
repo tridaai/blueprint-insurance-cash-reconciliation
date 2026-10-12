@@ -73,6 +73,7 @@ class LineOutcome(BaseModel):
     suspense_amount: Decimal = ZERO
     tier: Tier | None = None
     proposed_by: str | None = None
+    resend_of: str | None = None  # a returned line this payment re-sends
     notes: list[str] = []
 
     @property
@@ -89,6 +90,10 @@ class MatchContext:
     settled_line_ids: set[str]  # earlier lines that produced allocations
     proposer: object  # reader backend (propose_lump_sum)
     policy: PolicyConfig
+    # Lines whose cash the bank took back (returns.py). A returned
+    # line's fingerprint is reusable: the payer re-sending the money
+    # is not a duplicate, it is the same payment arriving again.
+    returned_line_ids: set[str] = field(default_factory=set)
     _consumed_remittances: set[str] = field(default_factory=set)
 
     def broker_for_payer(self, payer: str) -> Broker | None:
@@ -157,6 +162,19 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
     outcome = LineOutcome(bank_line_id=line.bank_line_id)
     broker = ctx.broker_for_payer(line.payer_name)
 
+    # -- re-send of a returned line: link it, then match it on its
+    # own merits. The link is information, never a match decision —
+    # and the duplicate check below will not see the returned
+    # original, whose fingerprint is reusable by design.
+    resend = _find_resend(line, ctx)
+    if resend is not None:
+        outcome.resend_of = resend.bank_line_id
+        outcome.notes.append(
+            f"Re-send of returned line {resend.bank_line_id}: the original "
+            "payment was returned by the bank, so this line is matched on "
+            "its own merits, not held as a duplicate."
+        )
+
     # -- remittance-led (T4): the day's advice from this broker ----------
     if broker is not None and line.reference is None:
         rem = ctx.remittance_for(line, broker)
@@ -201,6 +219,9 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
     if broker is not None:
         proposal = _propose_lump_sum(line, broker, ctx)
         if proposal is not None:
+            proposal.resend_of = outcome.resend_of
+            if outcome.resend_of:
+                proposal.notes = [*outcome.notes, *proposal.notes]
             return proposal
 
     # -- T5: unidentified ------------------------------------------------------
@@ -292,17 +313,39 @@ def _policy_for_payer(line: BankLine, ctx: MatchContext) -> Receivable | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def _fingerprint_match(line: BankLine, prior: BankLine, ctx: MatchContext) -> bool:
+    """The duplicate fingerprint: same payer, same amount, close
+    dates. Shared by the duplicate check and the re-send check —
+    they differ only in which population of priors they look at."""
+    if prior.bank_line_id == line.bank_line_id:
+        return False
+    if _norm(prior.payer_name) != _norm(line.payer_name):
+        return False
+    if prior.amount != line.amount:
+        return False
+    return abs((line.value_date - prior.value_date).days) <= ctx.policy.duplicate_window_days
+
+
 def _find_duplicate(line: BankLine, ctx: MatchContext) -> BankLine | None:
     for prior in ctx.prior_lines:
-        if prior.bank_line_id == line.bank_line_id:
-            continue
         if prior.bank_line_id not in ctx.settled_line_ids:
             continue
-        if _norm(prior.payer_name) != _norm(line.payer_name):
+        if prior.bank_line_id in ctx.returned_line_ids:
+            # The bank took this cash back; its fingerprint is
+            # reusable and the re-send is matched on its own merits.
             continue
-        if prior.amount != line.amount:
+        if _fingerprint_match(line, prior, ctx):
+            return prior
+    return None
+
+
+def _find_resend(line: BankLine, ctx: MatchContext) -> BankLine | None:
+    """A prior line with this line's fingerprint that was RETURNED:
+    this payment is the payer sending the money again."""
+    for prior in ctx.prior_lines:
+        if prior.bank_line_id not in ctx.returned_line_ids:
             continue
-        if abs((line.value_date - prior.value_date).days) <= ctx.policy.duplicate_window_days:
+        if _fingerprint_match(line, prior, ctx):
             return prior
     return None
 

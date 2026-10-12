@@ -27,6 +27,7 @@ from .logging_setup import configure_logging, new_request_id
 from .objects import ObjectStore, make_object_store
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
+from .returns import ReturnError, line_history, record_return
 from .statement import StatementImportError, import_statement
 from .store import Store, dump, make_store
 
@@ -61,6 +62,13 @@ class RematchRequest(BaseModel):
 class StatementImportRequest(BaseModel):
     text: str
     source_name: str = "statement"
+
+
+class ReturnRequest(BaseModel):
+    reason: str  # NSF | ACCOUNT_CLOSED | STOP_PAYMENT | RECALL
+    actor: str
+    on: date | None = None
+    amount: str | None = None  # anything but the full line amount is refused, in words
 
 
 def present(model) -> dict:
@@ -240,6 +248,39 @@ def create_app(service: Service | None = None) -> FastAPI:
             return present(gate.add_write_off(s.store, pack_id, body.exception_id, body.actor))
         except GateError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/returns")
+    def returns(on: date | None = None):
+        s = get_service()
+        return [present(r) for r in s.store.returns(on=on)]
+
+    @app.post("/api/bank-lines/{bank_line_id}/returns")
+    def record_line_return(bank_line_id: str, body: ReturnRequest):
+        s = get_service()
+        from decimal import Decimal, InvalidOperation
+
+        amount = None
+        if body.amount is not None:
+            try:
+                amount = Decimal(body.amount)
+            except InvalidOperation:
+                raise HTTPException(422, f"amount is not a decimal: {body.amount!r}")
+        try:
+            ret = record_return(
+                s.store, bank_line_id, body.reason, body.actor,
+                body.on or date.today(), amount=amount,
+            )
+        except ReturnError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return present(ret)
+
+    @app.get("/api/bank-lines/{bank_line_id}/history")
+    def bank_line_history(bank_line_id: str):
+        s = get_service()
+        history = line_history(s.store, bank_line_id)
+        if history["bank_line"] is None:
+            raise HTTPException(404, f"no such bank line: {bank_line_id}")
+        return history
 
     @app.get("/api/packs/{pack_id}/posting-file")
     def posting_file(pack_id: str):

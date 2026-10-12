@@ -166,6 +166,7 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
             remittances=store.remittances(on=day),
             prior_lines=prior,
             settled_line_ids=set(settled),
+            returned_line_ids={r.bank_line_id for r in store.returns()},
             proposer=reader,
             policy=policy,
         )
@@ -212,6 +213,14 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
                                    detail=f"tier={outcome.tier}, allocated={outcome.allocated_total}, "
                                           f"suspense={outcome.suspense_amount}, "
                                           f"exceptions={[e.code.value for e in outcome.exceptions]}"))
+            if outcome.resend_of:
+                line.resend_of = outcome.resend_of
+                store.save_bank_line(line)
+                store.audit(AuditEvent(at=_now(), actor="matcher", action="payment_resent",
+                                       subject=line.bank_line_id,
+                                       detail=f"Re-send of returned line {outcome.resend_of}: "
+                                              "the original cash was returned by the bank; "
+                                              "this line is linked to it and matched on its own merits."))
         return {}
 
     def assemble(state: DayState) -> DayState:

@@ -100,6 +100,7 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         remittances=sorted(store.remittances(), key=lambda r: (r.received_date, r.remittance_id), reverse=True),
         prior_lines=sorted(store.bank_lines(), key=lambda l: (l.value_date, l.bank_line_id)),
         settled_line_ids=set(approved) | set(allocated),
+        returned_line_ids={r.bank_line_id for r in store.returns()},
         proposer=reader,
         policy=policy,
     )

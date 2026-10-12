@@ -10,7 +10,13 @@ The control roll runs over the suspense ledger, because suspense is
 where unapplied cash lives:
 
     opening suspense + cash received into suspense in the month
-    − applied from suspense in the month = closing suspense
+    − applied from suspense in the month
+    − returned from suspense in the month = closing suspense
+
+The last term is the bank taking cash back: a returned line's
+suspense leaves by return, not by application, and the pack carries
+the month's returns (count and total) as a control line of their
+own, with each return listed as a reversing entry.
 
 Each suspense item's opening position is reconstructed from the
 records (the amount that entered suspense when its bank line was
@@ -62,22 +68,39 @@ def parse_month(text: str) -> tuple[int, int]:
 class _Position:
     """One suspense item, reconstructed: what entered suspense when
     its bank line was worked, and what re-match packs have released
-    since, by the packs' value dates."""
+    since, by the packs' value dates. A bank return of the item's
+    line releases the whole remaining position on the return date —
+    the cash went back to the payer, so it is in suspense no longer,
+    and the roll names that as its own term (returned_from_suspense)
+    rather than folding it into applications."""
 
-    def __init__(self, item, created: Decimal | None, releases: list[tuple[date, Decimal]]):
+    def __init__(self, item, created: Decimal | None, releases: list[tuple[date, Decimal]],
+                 returned_on: date | None = None):
         self.item = item
         self.created = created  # None when the bank line is not on the books
         self.releases = sorted(releases)
+        self.returned_on = returned_on
 
     def open_at(self, as_of: date) -> Decimal:
         if self.created is None:
             return self.item.amount
+        if self.returned_on is not None and as_of >= self.returned_on:
+            return ZERO
         released = sum((amt for d, amt in self.releases if d <= as_of), ZERO)
+        return self.created - released
+
+    def released_by_return(self) -> Decimal:
+        """The amount the return itself released: what was still open
+        on the return date. Zero when the line was never returned."""
+        if self.returned_on is None or self.created is None:
+            return ZERO
+        released = sum((amt for d, amt in self.releases if d <= self.returned_on), ZERO)
         return self.created - released
 
 
 def _positions(store: Store) -> tuple[list[_Position], dict[str, Decimal]]:
     lines = {l.bank_line_id: l for l in store.bank_lines()}
+    returned_on = {r.bank_line_id: r.return_date for r in store.returns()}
     day_alloc: dict[str, Decimal] = defaultdict(lambda: ZERO)
     releases: dict[str, list[tuple[date, Decimal]]] = defaultdict(list)
     for pack in store.packs():
@@ -94,7 +117,8 @@ def _positions(store: Store) -> tuple[list[_Position], dict[str, Decimal]]:
     for item in store.suspense_items():
         line = lines.get(item.bank_line_id)
         created = None if line is None else line.amount - day_alloc.get(item.bank_line_id, ZERO)
-        positions.append(_Position(item, created, releases.get(item.bank_line_id, [])))
+        positions.append(_Position(item, created, releases.get(item.bank_line_id, []),
+                                   returned_on.get(item.bank_line_id)))
     return positions, lines
 
 
@@ -175,12 +199,19 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         (amt for pos in positions for d, amt in pos.releases if in_month(d)),
         ZERO,
     )
+    returned_from_suspense = sum(
+        (pos.released_by_return() for pos in positions
+         if pos.returned_on is not None and in_month(pos.returned_on)),
+        ZERO,
+    )
     closing = sum(
         (pos.open_at(last) for pos in positions if pos.item.received_date <= last),
         ZERO,
     )
-    roll_closing = opening + received - applied
+    roll_closing = opening + received - applied - returned_from_suspense
     difference = roll_closing - closing
+
+    month_returns = [r for r in store.returns() if in_month(r.return_date)]
 
     # The month's packs: value date in the month and standing
     # approved. (A September pack approved on October the first is
@@ -202,6 +233,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             "allocation_total": as_str(pack.allocation_total),
             "write_off_total": as_str(pack.write_off_total),
             "decided_at": pack.decided_at.isoformat(),
+            "flags": list(pack.flags),
         })
         write_offs += pack.write_off_total
         applied_approved += pack.allocation_total
@@ -234,7 +266,9 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
     if footed:
         footing_note = (
             "The month FOOTS: opening suspense + cash received into suspense "
-            "− applied from suspense = closing suspense, to the cent, and the "
+            "− applied from suspense"
+            + (" − returned from suspense" if returned_from_suspense > ZERO else "")
+            + " = closing suspense, to the cent, and the "
             "closing figure agrees with the suspense ledger."
         )
     else:
@@ -255,6 +289,11 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             "cash_received_in_month": as_str(cash_received),
             "received_into_suspense": as_str(received),
             "applied_from_suspense": as_str(applied),
+            "returned_from_suspense": as_str(returned_from_suspense),
+            "returns_in_month": {
+                "count": len(month_returns),
+                "total": as_str(sum((r.amount for r in month_returns), ZERO)),
+            },
             "applied_allocations_approved": as_str(applied_approved),
             "approved_write_offs": as_str(write_offs),
             "closing_suspense": as_str(closing),
@@ -263,6 +302,19 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             "footed": footed,
             "footing_note": footing_note,
         },
+        "payment_returns_in_month": [
+            {
+                "return_id": r.return_id,
+                "bank_line_id": r.bank_line_id,
+                "reason": r.reason.value,
+                "return_date": r.return_date.isoformat(),
+                "amount": as_str(r.amount),
+                "recorded_by": r.recorded_by,
+                "pack_ids": list(r.pack_ids),
+                "detail": r.detail,
+            }
+            for r in month_returns
+        ],
         "packs_approved_in_month": packs_approved,
         "exceptions_opened_in_month": opened,
         "exceptions_closed_by_month_end": closed,
@@ -302,6 +354,8 @@ def render_close_pack_text(export: dict) -> str:
         f"  Cash received in month:      {roll['cash_received_in_month']:>12}  (bank total, all lines)",
         f"  Received into suspense:      {roll['received_into_suspense']:>12}",
         f"  Applied from suspense:       {roll['applied_from_suspense']:>12}",
+        f"  Returned from suspense:      {roll['returned_from_suspense']:>12}  (cash the bank took back; it leaves suspense by return, not by application)",
+        f"  Payment returns in month:    {roll['returns_in_month']['count']:>12}  totalling {roll['returns_in_month']['total']} (full bank lines, reversing entries below)",
         f"  Applied via approved packs:  {roll['applied_allocations_approved']:>12}",
         f"  Approved write-offs:         {roll['approved_write_offs']:>12}  (receivable deltas; they do not release suspense cash)",
         f"  Closing suspense:            {roll['closing_suspense']:>12}",
@@ -314,7 +368,16 @@ def render_close_pack_text(export: dict) -> str:
             f"  {pack['pack_id']} · value {pack['value_date']} · assembled by "
             f"{pack['assembled_by']} · approved by {', '.join(pack['approvals'])} · "
             f"allocations {pack['allocation_total']} · write-offs {pack['write_off_total']}"
+            + (f" · flags: {', '.join(pack['flags'])}" if pack.get("flags") else "")
         )
+    if body["payment_returns_in_month"]:
+        out += ["", f"PAYMENT RETURNS IN THE MONTH ({len(body['payment_returns_in_month'])})"]
+        for r in body["payment_returns_in_month"]:
+            out.append(
+                f"  {r['return_id']} · {r['bank_line_id']} · {r['reason']} · "
+                f"{r['amount']:>10} · returned {r['return_date']} · recorded by "
+                f"{r['recorded_by']} · reversing packs: {', '.join(r['pack_ids']) or '—'}"
+            )
     out += ["", f"EXCEPTIONS OPENED IN THE MONTH ({len(body['exceptions_opened_in_month'])})"]
     for e in body["exceptions_opened_in_month"]:
         out.append(
