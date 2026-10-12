@@ -108,7 +108,62 @@ place — pack approval in `gate.py`. That is what makes the audit
 claim true: every applied cent traces to bank line + allocation +
 pack + named approver. Write-offs are pack entries, not edits; a
 write-off above the single-approver limit cannot complete without a
-second, different approver, and both names land on the pack.
+second, different approver, and both names land on the pack. The one
+sanctioned counter-move is a recorded return (below): it reverses a
+gate application, deriving its amounts from the gate's own record —
+it introduces no second way of deciding what cash means.
+
+**Returns reverse; they never edit.** Applied cash comes back —
+NSF, a recall, a dishonoured cheque — and the tempting
+implementation is to delete the application and pretend the money
+was never there. `returns.py` does the opposite. The reversal
+amounts are derived by replaying the approved packs, in approval
+order, through `gate._apply` over pristine receivables: the same
+arithmetic that posted the cash, so the delta attributed to the
+returned line is exactly the delta the gate posted (the broker
+gross-up, with its capped settle-in-full branch, is where a naive
+"subtract the allocation" would quietly lose cents). The packs
+stand byte for byte and gain a RETURN_AFFECTED flag; the return is
+its own record and appears as a reversing entry on its day's
+report and in the close pack, whose suspense reconstruction gives
+returned cash its own roll term — an item's position goes to zero
+on the return date, and `returned_from_suspense` is what the roll
+subtracts, so the month foots with returns inside the identity.
+The duplicate check had to learn the same lesson: a returned line
+leaves `settled_line_ids` semantics unchanged (its allocations are
+still on record), so the matcher takes an explicit
+`returned_line_ids` set and skips those priors — the re-send is a
+new bank line, fingerprinted like any other, and the link back to
+the returned original is written onto its record at persist time.
+Part-returns are refused rather than modelled: a fractional notion
+of "applied" would infect every control in the system, and the
+refusal states the scope in words.
+
+**The workbench handles; it does not dispose.** The exception
+queue is worked daily, and the failure mode to avoid is a second,
+softer set of disposition buttons growing next to the governed
+ones. `workbench.py` therefore owns exactly two acts — assignment
+to a rostered name, and an append-only handling note — both
+audited, both provably inert against the exception's amount, code
+and status. The view is a fresh read model whose counts are taken
+over the whole open queue before filters apply, so the counts foot
+to the queue totals by construction rather than by agreement.
+
+**Proposals are graded by the gate's record.** A quality number
+for the model is only worth having if nobody gets to assert it.
+Pack entries carry their provenance from assembly (kind + backend)
+and, after this round, their edits — each edit a record with the
+original, the replacement, and the approver who made it, admitted
+only if the affected bank line still foots within the pack
+(`gate.edit_pack_entries`). `report.proposal_quality` then derives
+outcomes mechanically: pack rejected → REJECTED; approved with
+edits → ACCEPTED_WITH_EDITS (the edited value is the amount delta,
+or the full amount when money was redirected); approved untouched
+→ ACCEPTED_AS_PROPOSED. There is deliberately no per-person
+breakdown: the report's subject is the model's work, and the
+editor's name stays where it belongs — on the entry, in the audit
+trail. Provenance is stamped from this round forward; packs
+assembled before it carry no kind and are simply not graded.
 
 **Suspense is re-worked, not just aged.** A day run settles cash
 against the books as they stood on its value date; explanations that
@@ -184,8 +239,12 @@ policy reference is found in the description text as usual.
   JSONB with amounts as decimal strings, key columns beside them for
   the queries the desk runs. Numbered SQL migrations in `migrations/`
   are applied by the store at startup; `0002` adds the pgvector
-  embedding table. LangGraph checkpoints use the Postgres saver in
-  the same database when `DATABASE_URL` is set.
+  embedding table, `0003` the payment-returns table. LangGraph
+  checkpoints use the Postgres saver in the same database when
+  `DATABASE_URL` is set. The allocations table is an index of pack
+  entries; when the gate edits a pack, `replace_allocations` rewrites
+  that pack's rows so the index never describes a pack that no
+  longer stands.
 - **SQLite** (the local store): one file, `./data/cashrecon.db` by
   default (`SQLITE_PATH` moves it) — the local run needs no database
   server at all. The SQLite-dialect migrations in
@@ -229,4 +288,7 @@ claims or reinsurance cash — premium cash application for one
 carrier. Auto-application exists only as a *mark* on small exact
 matches; a deployment that wants true straight-through posting for
 that slice approves those packs in bulk, with the report still
-naming every line.
+naming every line. Part-returns are not modelled (a bank returning
+part of a line is refused at recording, in words), and proposal
+provenance exists only on packs assembled since the quality report
+landed — older packs are ungraded, not backfilled.

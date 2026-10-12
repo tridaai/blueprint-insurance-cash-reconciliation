@@ -67,7 +67,7 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (38 cases, gold by construction)
+make evals       # the golden-case gate (42 cases, gold by construction)
 make serve       # API + console on http://localhost:8000
 ```
 
@@ -185,6 +185,18 @@ still does not settle stays in suspense with its reason updated to
 the now-correct code, and every attempt — tiers run, outcome — is
 on the item's audit trail.
 
+**The workbench.** The queue has an owner and a memory (console
+Workbench tab, `GET /api/workbench`, `cash-recon workbench`).
+Every open exception can be assigned to a named member of the cash
+team — the roster is data, and an off-roster name is refused — and
+can carry dated handling notes: append-only, attributed, with no
+edit or delete path anywhere. Assignment and notes are handling
+metadata only; they never change an amount, a code, or a
+disposition. Dispositions still happen only through the governed
+paths above and below. The view runs oldest first, filters by
+code, broker, assignee, or unassigned, and its counts by code foot
+to the queue totals.
+
 ## The gate
 
 A posting pack is assembled per day by a named person and approved by
@@ -198,6 +210,40 @@ moment receivables change, and every applied cent keeps its trace:
 bank line, allocation, pack, approver. This system never moves money
 and never writes to a general ledger.
 
+**Editing a proposal at the gate.** A proposed pack's entries can
+be corrected before approval — by a named approver-side person,
+never the assembler — one governed act that adjusts amounts and/or
+targets atomically. Each change is recorded on the entry beside the
+original it replaced, and the edit is refused whole if any bank
+line's entries would stop summing to the total they summed to
+before: an edit redistributes a line's cash, it does not create or
+destroy any. Decided packs cannot be edited; they are history.
+
+## Returned payments
+
+Cash that was applied can come back: an ACH debit bounces, a wire
+is recalled, a cheque is dishonoured. Recording the return (the
+console's Day report tab, `POST /api/bank-lines/{id}/returns`,
+`cash-recon return`) un-applies the line's allocations **exactly**
+— the reversal deltas are derived by replaying the approved packs
+through the gate's own apply arithmetic, so every settled item
+re-opens at its prior balance and prior status, broker gross-ups
+included, to the cent. Nothing approved is rewritten: the packs
+that carried the line keep their entries byte for byte and gain a
+`RETURN_AFFECTED` flag, and the return stands as a reversing entry
+on the day report of the day it is recorded and in the month-end
+close pack, whose suspense roll names returned cash as its own
+term. Suspense the line held is released by the return — the money
+went back to the payer. A returned line cannot be re-applied
+as-is; if the payer re-sends, the money arrives as a **new** bank
+line, is matched on its own merits (the duplicate check treats a
+returned line's fingerprint as reusable), and is linked back to
+the returned original on its record. The whole chain — application,
+return, re-application — reads off the line's history
+(`GET /api/bank-lines/{id}/history`, `cash-recon history`).
+Full-line returns only: a bank returning part of a line is refused
+at recording time, with the reason stated.
+
 ## The daily report
 
 The control the day is judged by: bank total vs allocated vs posted
@@ -207,6 +253,24 @@ call the day reconciled. Suspense is aged in buckets (0–7, 8–30,
 31–60, 60+ days) with the oldest items named. Cash recovered by the
 re-match pass is shown as its own line for the day the recovery ran,
 by bank line — never folded silently into the day's allocations.
+Returns recorded on the day stand on the report as their own
+control line — count and total — and the day a returned line was
+received restates its allocations net of the return, beside the
+gross figures, neither netted away silently.
+
+## Proposal quality
+
+What the gate did with the model's work, measured from the gate's
+own records (`GET /api/proposals/quality`, `cash-recon quality`,
+the console's Packs tab, and a section of the close pack). Every
+allocation that stands on a model proposal — a remittance reading
+or a lump-sum proposal, stamped with its kind and backend when the
+pack is assembled — is graded by the approver's actual act:
+**accepted as proposed**, **accepted with edits** (with the total
+value edited), or **rejected** with its pack. Code-matched tiers
+are not graded; the model made no claim there. The report groups
+by proposal kind and foots to the decided packs, and it scores the
+model's work — no individual human is scored anywhere in it.
 
 ## The month-end close pack
 
@@ -222,7 +286,14 @@ disagree, or an item cannot be traced to a bank line, the pack says
 every posting pack approved for the month (with its approvers),
 every exception opened in the month and every one closed by month
 end with its disposition, suspense aging at month end, and the
-broker scorecard scoped to the month. Approved write-offs stand in
+broker scorecard scoped to the month. The month's payment returns
+stand in the pack as reversing entries — count and total as a
+control line, each return listed, the packs it reversed named and
+flagged — and cash a return pulled out of suspense is its own term
+in the roll, so the month foots with the returns inside it, not
+around it. The pack also carries the month's proposal quality:
+what the gate accepted as proposed, accepted with edits, and
+rejected. Approved write-offs stand in
 the roll as their own control line: they dispose of receivable
 deltas, not of suspense cash, so they are reported, never netted
 into the suspense identity. Export is one JSON plus a human-readable
@@ -263,13 +334,19 @@ paperwork, never people, and it sends nothing.
 ## Evals
 
 `make evals` runs the synthetic month through the real pipeline and
-scores 38 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 42 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
 the correct code), the installment cases (a named installment
 settles the named one; a note indicating a later installment applies
-oldest-first under INTENT_DIFFERS), and controls (every day foots;
+oldest-first under INTENT_DIFFERS), the return cases (an NSF return
+re-opens its policy, a part-return is refused, the pack is flagged
+with its posting file untouched, and the re-send applies cleanly
+linked to the original; an overpaid line's return releases its
+suspense and the close still foots), a workbench case (assignment,
+append-only notes, counts that foot), a proposal-quality case (one
+of each outcome, figures footing to the gate records), and controls (every day foots;
 the opening suspense ages into the right buckets; the broker
 scorecard's money foots to the daily reports; the September close
 pack foots with a stable digest; the example statement imports
@@ -292,8 +369,10 @@ src/cash_recon/
   matcher.py     the five tiers, in code, with the footing assertion
   llm.py         the model port: reader, proposer, note drafter
   documents.py   the document screen + near-duplicate detection
-  gate.py        packs, approvals, write-offs, the posting file
-  report.py      the daily reconciliation report, suspense aging, the broker scorecard
+  gate.py        packs, approvals, entry edits, write-offs, the posting file
+  returns.py     returned payments: exact reversal, pack flags, the line's history
+  workbench.py   the exception workbench: assignment, handling notes, the queue view
+  report.py      the daily reconciliation report, suspense aging, the broker scorecard, proposal quality
   close_pack.py  the month-end close pack: control roll, digest, JSON + text export
   statement.py   the bank statement importer: generic CSV in, bank lines out
   pipeline.py    the day run as a LangGraph graph
@@ -309,8 +388,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 92 tests,
-38/38 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 108 tests,
+42/42 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, and the offline fallback is what the demo and the
