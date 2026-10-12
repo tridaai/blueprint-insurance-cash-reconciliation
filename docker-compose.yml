@@ -1,0 +1,89 @@
+# Insurance Cash Reconciliation Agent — production topology, locally.
+#
+# The API container is stateless: all state lives in PostgreSQL (records,
+# LangGraph checkpoints, pgvector document embeddings) and the S3 bucket
+# (remittance documents). The API applies ./migrations on startup.
+#
+#   docker compose up --build
+#   curl localhost:8000/health
+#   open http://localhost:8000 for the console
+#
+# A real model is the lead profile: copy .env.example to .env and set a
+# provider. With no key the pipeline uses the labelled offline fallback.
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://cashrecon:cashrecon@postgres:5432/cashrecon
+      S3_BUCKET: remittance-documents
+      S3_ENDPOINT_URL: http://minio:8333
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_REGION: us-east-1
+      # Pass-through from the host environment / .env (empty = unset).
+      LLM_BACKEND: ${LLM_BACKEND:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      API_KEY: ${API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bucket-init:
+        condition: service_completed_successfully
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: cashrecon
+      POSTGRES_PASSWORD: cashrecon
+      POSTGRES_DB: cashrecon
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U cashrecon -d cashrecon -tAc 'SELECT 1' >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # S3-compatible object storage: SeaweedFS's S3 gateway serves the
+  # `minio` hostname (S3_ENDPOINT_URL above). Only the S3 API matters.
+  minio:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -dir=/data -ip=0.0.0.0
+    volumes:
+      - s3data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8333/"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  bucket-init:
+    image: curlimages/curl:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    # Plain unsigned bucket PUT: SeaweedFS accepts bucket creation
+    # unauthenticated in this local topology; against authenticated S3
+    # the API's own signed ensure-bucket at startup does the same job.
+    entrypoint: ["sh", "-c", "curl -sf -X PUT http://minio:8333/remittance-documents || true"]
+
+  # Optional local model server (docker compose --profile ollama up).
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollamadata:/root/.ollama
+
+volumes:
+  pgdata:
+  s3data:
+  ollamadata:

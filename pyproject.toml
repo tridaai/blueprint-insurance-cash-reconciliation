@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trida-blueprint-insurance-cash-reconciliation"
+version = "0.1.0"
+description = "Trida AI Blueprint — Insurance Cash Reconciliation Agent (reference prototype)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+# Direct dependencies are pinned EXACTLY (==). The full transitive set is
+# frozen in constraints.txt; the pip fallback installs that set first and
+# the package itself second (see Makefile, target install-pip).
+dependencies = [
+    "langgraph==0.6.11",
+    "fastapi==0.143.0",
+    "pydantic==2.14.0",
+    "uvicorn==0.54.0",
+    # Transitive via langchain-core -> langsmith (websockets>=15.0,
+    # unbounded); websockets 17.x requires Python >=3.11, 16.0 does not.
+    "websockets==16.0",
+    "langgraph-checkpoint-postgres==3.0.0",
+    "psycopg[binary]==3.2.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "httpx==0.28.1"]
+llm = ["openai==3.27.0", "anthropic==1.13.0"]
+
+[project.scripts]
+cash-recon = "cash_recon.cli:main"
+cash-recon-demo = "cash_recon.demo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cash_recon = ["static/*.html"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
