@@ -1,0 +1,31 @@
+{"case": "BL-001", "kind": "bank_line", "tier": "T1_EXACT", "exceptions": [], "allocations": {"NSP-1001": "4800.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-002", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1021": "4693.72"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-003", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1008": "8117.88"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-004", "kind": "bank_line", "tier": null, "exceptions": ["NETTING_MISMATCH"], "allocations": {}, "suspense": "5182.40", "auto": false, "proposed": false}
+{"case": "BL-005", "kind": "bank_line", "tier": "T1_EXACT", "exceptions": [], "allocations": {"NSP-1028": "6120.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-006", "kind": "bank_line", "tier": "T3_REFERENCE", "exceptions": ["PARTIAL"], "allocations": {"NSP-1037": "7000.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-007", "kind": "bank_line", "tier": "T3_REFERENCE", "exceptions": ["OVERPAID"], "allocations": {"NSP-1010": "2960.00"}, "suspense": "140.00", "auto": false, "proposed": false}
+{"case": "BL-008", "kind": "bank_line", "tier": "T4_REMITTANCE", "exceptions": [], "allocations": {"NSP-1002": "10850.00", "NSP-1011": "6431.60", "NSP-1020": "14805.00", "NSP-1029": "9165.62"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-009", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1003": "2221.99"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-010", "kind": "bank_line", "tier": null, "exceptions": ["REMITTANCE_ARITHMETIC"], "allocations": {}, "suspense": "36974.59", "auto": false, "proposed": false}
+{"case": "BL-011", "kind": "bank_line", "tier": null, "exceptions": ["UNIDENTIFIED"], "allocations": {}, "suspense": "1875.00", "auto": false, "proposed": false}
+{"case": "BL-012", "kind": "bank_line", "tier": "T4_REMITTANCE", "exceptions": ["UNKNOWN_POLICY"], "allocations": {"NSP-1005": "19425.00"}, "suspense": "2500.00", "auto": false, "proposed": false}
+{"case": "BL-013", "kind": "bank_line", "tier": null, "exceptions": ["CANCELLED_POLICY"], "allocations": {}, "suspense": "7280.00", "auto": false, "proposed": false}
+{"case": "BL-014", "kind": "bank_line", "tier": "T3_REFERENCE", "exceptions": [], "allocations": {"NSP-1044": "3931.20"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-015", "kind": "bank_line", "tier": null, "exceptions": ["DUPLICATE_PAYMENT"], "allocations": {}, "suspense": "6120.00", "auto": false, "proposed": false}
+{"case": "BL-016", "kind": "bank_line", "tier": "T4_REMITTANCE", "exceptions": [], "allocations": {"NSP-1015": "4512.00", "NSP-1024": "5544.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-017", "kind": "bank_line", "tier": null, "exceptions": [], "allocations": {"NSP-1018": "8621.96", "NSP-1036": "2905.80", "NSP-1045": "10544.40"}, "suspense": "0.00", "auto": false, "proposed": true}
+{"case": "BL-018", "kind": "bank_line", "tier": "T3_REFERENCE", "exceptions": ["PARTIAL"], "allocations": {"NSP-1013": "600.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-019", "kind": "bank_line", "tier": "T1_EXACT", "exceptions": [], "allocations": {"NSP-1040": "2765.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-020", "kind": "bank_line", "tier": "T3_REFERENCE", "exceptions": ["OVERPAID"], "allocations": {"NSP-1033": "1625.00"}, "suspense": "375.00", "auto": false, "proposed": false}
+{"case": "BL-021", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1043": "5322.20"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-022", "kind": "bank_line", "tier": "T1_EXACT", "exceptions": [], "allocations": {"NSP-1019": "420.00"}, "suspense": "0.00", "auto": true, "proposed": false}
+{"case": "BL-023", "kind": "bank_line", "tier": null, "exceptions": ["UNIDENTIFIED"], "allocations": {}, "suspense": "640.00", "auto": false, "proposed": false}
+{"case": "BL-024", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1041": "10073.25"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "REM-ALDER-01", "kind": "remittance", "lines": {"NSP-1002": "10850.00", "NSP-1011": "6431.60", "NSP-1020": "14805.00", "NSP-1029": "9165.62"}, "injection": false, "duplicate_of": null}
+{"case": "REM-ALDER-02", "kind": "remittance", "lines": {"NSP-1002": "10850.00", "NSP-1011": "6431.60", "NSP-1020": "14805.00", "NSP-1029": "9165.62"}, "injection": false, "duplicate_of": "REM-ALDER-01"}
+{"case": "REM-DUNMORE-01", "kind": "remittance", "lines": {"NSP-1005": "19425.00", "NSP-1099": "2500.00"}, "injection": false, "duplicate_of": null}
+{"case": "REM-ELKHORN-01", "kind": "remittance", "lines": {"NSP-1015": "4512.00", "NSP-1024": "5544.00"}, "injection": true, "duplicate_of": null}
+{"case": "REM-FERN-01", "kind": "remittance", "lines": {"NSP-1016": "6929.18", "NSP-1025": "19705.04", "NSP-1034": "10440.37"}, "injection": false, "duplicate_of": null}
+{"case": "CONTROL-FOOTING", "kind": "control", "expect": "every day report foots"}
+{"case": "CONTROL-AGING", "kind": "control", "expect": "seed suspense ages into 31\u201360 and 60+ buckets"}
