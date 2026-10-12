@@ -220,7 +220,27 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
                  ("persist", "assemble"), ("assemble", "sweep"), ("sweep", "report")]:
         graph.add_edge(a, b)
     graph.add_edge("report", END)
-    return graph.compile(checkpointer=MemorySaver())
+    return graph.compile(checkpointer=_checkpointer())
+
+
+def _checkpointer():
+    """Postgres checkpoints when DATABASE_URL is set (production);
+    in-memory otherwise. A checkpointer failure must not stop the
+    desk, so any error falls back with a logged warning."""
+    import os
+
+    dsn = os.environ.get("DATABASE_URL")
+    if dsn:
+        try:
+            import psycopg
+            from langgraph.checkpoint.postgres import PostgresSaver
+
+            saver = PostgresSaver(psycopg.connect(dsn, autocommit=True))
+            saver.setup()
+            return saver
+        except Exception:
+            log.warning("Postgres checkpointer unavailable; using in-memory", exc_info=True)
+    return MemorySaver()
 
 
 def _expected_net(ctx: MatchContext, exc: ExceptionRecord):
