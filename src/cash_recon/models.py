@@ -50,6 +50,7 @@ class ExceptionCode(str, Enum):
     CANCELLED_POLICY = "CANCELLED_POLICY"  # cash for a cancelled policy
     DUPLICATE_PAYMENT = "DUPLICATE_PAYMENT"  # same cash, twice
     STALE_SUSPENSE = "STALE_SUSPENSE"  # unapplied past the configured age
+    INTENT_DIFFERS = "INTENT_DIFFERS"  # note indicated another installment; applied oldest-first
 
 
 class PackStatus(str, Enum):
@@ -95,7 +96,13 @@ class Receivable(BaseModel):
         return sum((i.open_balance for i in self.installments), Decimal("0.00"))
 
     def open_installments(self) -> list[Installment]:
-        return [i for i in self.installments if i.open_balance > 0]
+        """Open installments in allocation order: oldest first, by
+        sequence. The order is a guarantee of the record, not an
+        accident of how the installments happen to be stored."""
+        return sorted(
+            (i for i in self.installments if i.open_balance > 0),
+            key=lambda i: i.sequence,
+        )
 
 
 class BankLine(BaseModel):

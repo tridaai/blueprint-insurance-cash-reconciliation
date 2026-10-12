@@ -11,8 +11,11 @@ remittance, a remittance whose lines do not sum to the wire, a
 remittance citing a policy that is not on the books, cash for a
 cancelled policy, installments paid short / over / combined, a
 duplicate payment, an unexplained lump sum for the proposer, two
-unidentified lines, and one remittance carrying an instruction
-injection. Two older unidentified lines open the suspense ledger.
+unidentified lines, one remittance carrying an instruction
+injection, a payment naming a specific installment in its
+reference, and a payment whose note indicates a later installment
+while its reference names none (INTENT_DIFFERS). Two older
+unidentified lines open the suspense ledger.
 """
 
 from __future__ import annotations
@@ -326,6 +329,22 @@ def build_dataset() -> Dataset:
     gold["BL-023"] = GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="640.00")
     bank("BL-024", date(2026, 9, 18), net("NSP-1041"), names["BRK-DUNMORE"], "NSP-1041")
     gold["BL-024"] = GoldOutcome(tier="T2_NETTING", allocations={"NSP-1041": str(net("NSP-1041"))})
+
+    # ---- 2026-09-21 / 22: installment-aware allocation ---------------------
+    # The reference names installment 3 of NSP-1003 (installment 1 was
+    # settled on 09-07; installment 2 is older but the payer named 3).
+    named_net = net_of(D("2468.87"), rates["BRK-BAYLINE"])
+    bank("BL-025", date(2026, 9, 21), named_net, names["BRK-BAYLINE"], "NSP-1003-I3")
+    gold["BL-025"] = GoldOutcome(tier="T2_NETTING", allocations={"NSP-1003": str(named_net)})
+
+    # The note says installment 2; the reference names no installment.
+    # The amount is installment 1's net due exactly: it applies to
+    # installment 1, oldest first, with INTENT_DIFFERS on the record.
+    intent_net = net_of(D("3937.57"), rates["BRK-ELKHORN"])
+    bank("BL-026", date(2026, 9, 22), intent_net, names["BRK-ELKHORN"], "NSP-1006",
+         narrative="For installment 2 — paying ahead of schedule")
+    gold["BL-026"] = GoldOutcome(tier="T2_NETTING", exceptions=["INTENT_DIFFERS"],
+                                 allocations={"NSP-1006": str(intent_net)})
 
     bank_lines.sort(key=lambda b: (b.value_date, b.bank_line_id))
     return Dataset(brokers=brokers, receivables=receivables, bank_lines=bank_lines,

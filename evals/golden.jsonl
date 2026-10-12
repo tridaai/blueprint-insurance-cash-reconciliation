@@ -22,6 +22,8 @@
 {"case": "BL-022", "kind": "bank_line", "tier": "T1_EXACT", "exceptions": [], "allocations": {"NSP-1019": "420.00"}, "suspense": "0.00", "auto": true, "proposed": false}
 {"case": "BL-023", "kind": "bank_line", "tier": null, "exceptions": ["UNIDENTIFIED"], "allocations": {}, "suspense": "640.00", "auto": false, "proposed": false}
 {"case": "BL-024", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1041": "10073.25"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-025", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1003": "2221.98"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-026", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": ["INTENT_DIFFERS"], "allocations": {"NSP-1006": "3150.06"}, "suspense": "0.00", "auto": false, "proposed": false}
 {"case": "REM-ALDER-01", "kind": "remittance", "lines": {"NSP-1002": "10850.00", "NSP-1011": "6431.60", "NSP-1020": "14805.00", "NSP-1029": "9165.62"}, "injection": false, "duplicate_of": null}
 {"case": "REM-ALDER-02", "kind": "remittance", "lines": {"NSP-1002": "10850.00", "NSP-1011": "6431.60", "NSP-1020": "14805.00", "NSP-1029": "9165.62"}, "injection": false, "duplicate_of": "REM-ALDER-01"}
 {"case": "REM-DUNMORE-01", "kind": "remittance", "lines": {"NSP-1005": "19425.00", "NSP-1099": "2500.00"}, "injection": false, "duplicate_of": null}
