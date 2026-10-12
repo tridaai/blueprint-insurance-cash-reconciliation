@@ -97,6 +97,7 @@ class Store(Protocol):
     def set_embedding(self, remittance_id: str, vector: list[float]) -> None: ...
     def embeddings(self) -> dict[str, list[float]]: ...
     def save_allocations(self, allocs: list[Allocation], pack_id: str | None) -> None: ...
+    def replace_allocations(self, allocs: list[Allocation], pack_id: str) -> None: ...
     def allocations(self, bank_line_id: str | None = None) -> list[Allocation]: ...
     def add_exception(self, exc: ExceptionRecord) -> None: ...
     def exceptions(self, status: str | None = None) -> list[ExceptionRecord]: ...
@@ -122,7 +123,7 @@ class InMemoryStore:
         self._bank_lines: dict[str, BankLine] = {}
         self._remittances: dict[str, Remittance] = {}
         self._embeddings: dict[str, list[float]] = {}
-        self._allocations: list[Allocation] = []
+        self._allocations: list[tuple[str | None, Allocation]] = []
         self._exceptions: dict[str, ExceptionRecord] = {}
         self._suspense: dict[str, SuspenseItem] = {}
         self._packs: dict[str, PostingPack] = {}
@@ -196,12 +197,16 @@ class InMemoryStore:
 
     # -- outcomes -----------------------------------------------------------
     def save_allocations(self, allocs, pack_id):
-        self._allocations.extend(copy.deepcopy(allocs))
+        self._allocations.extend((pack_id, copy.deepcopy(a)) for a in allocs)
+
+    def replace_allocations(self, allocs, pack_id):
+        self._allocations = [(p, a) for p, a in self._allocations if p != pack_id]
+        self._allocations.extend((pack_id, copy.deepcopy(a)) for a in allocs)
 
     def allocations(self, bank_line_id=None):
         if bank_line_id is None:
-            return copy.deepcopy(list(self._allocations))
-        return copy.deepcopy([a for a in self._allocations if a.bank_line_id == bank_line_id])
+            return copy.deepcopy([a for _p, a in self._allocations])
+        return copy.deepcopy([a for _p, a in self._allocations if a.bank_line_id == bank_line_id])
 
     def add_exception(self, exc):
         self._exceptions[exc.exception_id] = copy.deepcopy(exc)
@@ -415,6 +420,10 @@ class PostgresStore:
                 "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (bank_line_id, installment_id) DO NOTHING",
                 (a.bank_line_id, a.policy_number, a.installment_id, a.amount, a.tier.value if a.tier else None, pack_id, dump(a)),
             )
+
+    def replace_allocations(self, allocs, pack_id):
+        self._put("DELETE FROM allocations WHERE pack_id = %s", (pack_id,))
+        self.save_allocations(allocs, pack_id)
 
     def allocations(self, bank_line_id=None):
         if bank_line_id is None:
@@ -687,6 +696,10 @@ class SqliteStore:
                 (a.bank_line_id, a.policy_number, a.installment_id, str(a.amount),
                  a.tier.value if a.tier else None, pack_id, dump(a)),
             )
+
+    def replace_allocations(self, allocs, pack_id):
+        self._put("DELETE FROM allocations WHERE pack_id = ?", (pack_id,))
+        self.save_allocations(allocs, pack_id)
 
     def allocations(self, bank_line_id=None):
         if bank_line_id is None:

@@ -205,6 +205,23 @@ class SuspenseItem(BaseModel):
         return (as_of - self.received_date).days
 
 
+class EntryEdit(BaseModel):
+    """One governed change to a proposed pack entry, made at the
+    gate before approval: what the entry said, what it says now,
+    and the approver who changed it. The original proposal is never
+    lost — it is the first edit's "before", and it is what the
+    proposal quality report grades the model against."""
+
+    at: datetime
+    by: str
+    before_policy: str
+    before_installment: str
+    before_amount: Decimal
+    after_policy: str
+    after_installment: str
+    after_amount: Decimal
+
+
 class PostingEntry(BaseModel):
     """One line of a posting pack: an allocation, or a delta write-off."""
 
@@ -214,6 +231,15 @@ class PostingEntry(BaseModel):
     write_off_amount: Decimal | None = None
     write_off_exception_id: str | None = None
     auto_applied: bool = False  # T1 exact at/below the policy threshold
+    # Provenance for the quality report: set when the allocation
+    # stands on a model proposal — "remittance_read" (the reader's
+    # reading of an advice) or "lump_sum" (the proposer's subset) —
+    # and the backend that proposed it. Code-matched tiers carry
+    # neither: the model made no claim there, so there is nothing
+    # to grade.
+    proposal_kind: str | None = None
+    proposed_by: str | None = None
+    edits: list[EntryEdit] = Field(default_factory=list)
 
 
 class PostingPack(BaseModel):

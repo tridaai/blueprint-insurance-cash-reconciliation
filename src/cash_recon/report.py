@@ -201,6 +201,105 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
     }
 
 
+def proposal_quality(store: Store, month: tuple[int, int] | None = None) -> dict:
+    """How the model's proposals fared at the gate — the proof
+    report for the proof item.
+
+    Every decided pack is walked; each allocation entry that stands
+    on a model proposal (see gate._proposal_kind) is graded by what
+    the approver actually did, never by anything the model or the
+    desk said about it:
+
+    - ACCEPTED_AS_PROPOSED — approved with the entry untouched;
+    - ACCEPTED_WITH_EDITS — approved after a governed edit; the
+      value edited is, per entry, the amount change when the target
+      stood, or the full final amount when the money was redirected
+      to a different installment or policy;
+    - REJECTED — its pack was rejected, whatever the entry said.
+
+    Grouped by proposal kind (remittance reads vs lump-sum
+    proposals), with totals. Computed fresh from the pack records;
+    there are no scores for individual humans — the subject is the
+    model's work, and an edit's author is on the entry for anyone
+    who needs the audit trail, not ranked here. With `month`, only
+    packs whose value date falls in it count — the form the
+    month-end close pack carries."""
+    by_kind: dict[str, dict] = {}
+    details: list[dict] = []
+
+    def slot(kind: str) -> dict:
+        return by_kind.setdefault(kind, {
+            "proposals": 0, "accepted_as_proposed": 0,
+            "accepted_with_edits": 0, "rejected": 0, "value_edited": ZERO,
+        })
+
+    packs = sorted(store.packs(), key=lambda p: (p.value_date, p.pack_id))
+    for pack in packs:
+        if pack.status.value not in ("approved", "rejected"):
+            continue
+        if month is not None and (pack.value_date.year, pack.value_date.month) != month:
+            continue
+        for entry in pack.entries:
+            if entry.kind != "allocation" or not entry.allocation or not entry.proposal_kind:
+                continue
+            alloc = entry.allocation
+            if pack.status.value == "rejected":
+                outcome = "REJECTED"
+            elif entry.edits:
+                outcome = "ACCEPTED_WITH_EDITS"
+            else:
+                outcome = "ACCEPTED_AS_PROPOSED"
+            edited_value = ZERO
+            original_amount = alloc.amount
+            if entry.edits:
+                first, last = entry.edits[0], entry.edits[-1]
+                original_amount = first.before_amount
+                if (first.before_policy, first.before_installment) != (
+                    last.after_policy, last.after_installment
+                ):
+                    edited_value = last.after_amount
+                else:
+                    edited_value = abs(last.after_amount - first.before_amount)
+            s = slot(entry.proposal_kind)
+            s["proposals"] += 1
+            s[outcome.lower()] += 1
+            s["value_edited"] += edited_value
+            details.append({
+                "pack_id": pack.pack_id,
+                "bank_line_id": alloc.bank_line_id,
+                "policy_number": alloc.policy_number,
+                "installment_id": alloc.installment_id,
+                "kind": entry.proposal_kind,
+                "proposed_by": entry.proposed_by,
+                "outcome": outcome,
+                "amount": str(alloc.amount),
+                "original_amount": str(original_amount),
+                "edited_value": str(edited_value),
+            })
+
+    def render(s: dict) -> dict:
+        return {
+            "proposals": s["proposals"],
+            "accepted_as_proposed": s["accepted_as_proposed"],
+            "accepted_with_edits": s["accepted_with_edits"],
+            "rejected": s["rejected"],
+            "value_edited": str(s["value_edited"]),
+        }
+
+    totals = {
+        "proposals": sum(s["proposals"] for s in by_kind.values()),
+        "accepted_as_proposed": sum(s["accepted_as_proposed"] for s in by_kind.values()),
+        "accepted_with_edits": sum(s["accepted_with_edits"] for s in by_kind.values()),
+        "rejected": sum(s["rejected"] for s in by_kind.values()),
+        "value_edited": str(sum((s["value_edited"] for s in by_kind.values()), ZERO)),
+    }
+    return {
+        "by_kind": {k: render(v) for k, v in sorted(by_kind.items())},
+        "totals": totals,
+        "proposals": details,
+    }
+
+
 def broker_scorecard(store: Store, as_of: date, month: tuple[int, int] | None = None) -> list[dict]:
     """Per-broker read model over everything on the books.
 

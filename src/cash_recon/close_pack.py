@@ -45,7 +45,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from .money import ZERO, as_str
-from .report import BUCKETS, broker_scorecard
+from .report import BUCKETS, broker_scorecard, proposal_quality
 from .store import Store
 
 
@@ -320,6 +320,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         "exceptions_closed_by_month_end": closed,
         "suspense_aging_at_month_end": _aging(positions, last),
         "broker_scorecard": broker_scorecard(store, last, month=(year, month)),
+        "proposal_quality": proposal_quality(store, month=(year, month)),
         "discrepancies": discrepancies,
     }
     return body
@@ -397,6 +398,21 @@ def render_close_pack_text(export: dict) -> str:
                 f"      {item['bank_line_id']:<10} {item['amount']:>10}  "
                 f"{item['age_days']} days — {item['reason']}"
             )
+    quality = body.get("proposal_quality") or {"by_kind": {}, "totals": {"proposals": 0}}
+    if quality["totals"]["proposals"]:
+        out += ["", "MODEL PROPOSAL QUALITY (packs decided with this month's value dates)"]
+        for kind, s in quality["by_kind"].items():
+            out.append(
+                f"  {kind:<18} proposals {s['proposals']} · accepted as proposed "
+                f"{s['accepted_as_proposed']} · accepted with edits {s['accepted_with_edits']} · "
+                f"rejected {s['rejected']} · value edited {s['value_edited']}"
+            )
+        t = quality["totals"]
+        out.append(
+            f"  {'ALL':<18} proposals {t['proposals']} · accepted as proposed "
+            f"{t['accepted_as_proposed']} · accepted with edits {t['accepted_with_edits']} · "
+            f"rejected {t['rejected']} · value edited {t['value_edited']}"
+        )
     out += ["", "BROKER SCORECARD FOR THE MONTH"]
     for row in body["broker_scorecard"]:
         rate = row["clean_netting_rate"] or "—"

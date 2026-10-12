@@ -23,6 +23,7 @@ from cash_recon.config import Policy as PolicyConfig
 from cash_recon.dataset import build_dataset
 from cash_recon.llm import OfflineReader
 from cash_recon.models import (
+    Allocation,
     AuditEvent,
     BankLine,
     ExceptionCode,
@@ -114,6 +115,17 @@ def battery(store, tag: str = "") -> None:
     store.save_bank_line(bl)
     saved = [l for l in store.bank_lines(on=date(2026, 9, 3)) if l.bank_line_id == bl.bank_line_id]
     assert saved and saved[0].resend_of == "BL-001"
+
+    # Allocations: saved under a pack; a gate edit replaces the
+    # pack's rows wholesale so the index follows the pack.
+    alloc = Allocation(bank_line_id=f"BL-{tag}ALLOC", policy_number="NSP-1001",
+                       installment_id="NSP-1001-I1", amount=D("10.00"), tier=None)
+    store.save_allocations([alloc], f"PACK-{tag}BATTERY")
+    assert [a.amount for a in store.allocations(alloc.bank_line_id)] == [D("10.00")]
+    alloc.amount = D("12.00")
+    store.replace_allocations([alloc], f"PACK-{tag}BATTERY")
+    mine = store.allocations(alloc.bank_line_id)
+    assert len(mine) == 1 and mine[0].amount == D("12.00")
 
     # Payment returns: recorded, listed by date, found by line.
     ret = PaymentReturn(

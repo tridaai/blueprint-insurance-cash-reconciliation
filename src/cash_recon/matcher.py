@@ -179,7 +179,13 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
     if broker is not None and line.reference is None:
         rem = ctx.remittance_for(line, broker)
         if rem is not None:
-            return _match_remittance(line, rem, ctx, outcome)
+            outcome = _match_remittance(line, rem, ctx, outcome)
+            if outcome.allocations and outcome.proposed_by is None:
+                # The allocations stand on the reader's reading of
+                # the advice — name the reader, as the lump-sum path
+                # names its proposer.
+                outcome.proposed_by = getattr(ctx.proposer, "name", None)
+            return outcome
 
     # -- duplicate check, in code, before any tier -------------------------
     dup = _find_duplicate(line, ctx)

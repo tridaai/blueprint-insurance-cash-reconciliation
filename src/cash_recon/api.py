@@ -65,6 +65,18 @@ class StatementImportRequest(BaseModel):
     source_name: str = "statement"
 
 
+class EntryAdjustment(BaseModel):
+    entry_index: int
+    new_amount: str | None = None
+    new_policy: str | None = None
+    new_installment: str | None = None
+
+
+class EditPackRequest(BaseModel):
+    actor: str
+    adjustments: list[EntryAdjustment]
+
+
 class AssignRequest(BaseModel):
     assignee: str
     actor: str
@@ -277,6 +289,31 @@ def create_app(service: Service | None = None) -> FastAPI:
             return present(gate.reject_pack(s.store, pack_id, body.actor, body.reason))
         except GateError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/packs/{pack_id}/edit")
+    def edit_pack(pack_id: str, body: EditPackRequest):
+        s = get_service()
+        from decimal import Decimal, InvalidOperation
+
+        adjustments = []
+        for adj in body.adjustments:
+            item = {"entry_index": adj.entry_index, "new_policy": adj.new_policy,
+                    "new_installment": adj.new_installment}
+            if adj.new_amount is not None:
+                try:
+                    item["new_amount"] = Decimal(adj.new_amount)
+                except InvalidOperation:
+                    raise HTTPException(422, f"new_amount is not a decimal: {adj.new_amount!r}")
+            adjustments.append(item)
+        try:
+            return present(gate.edit_pack_entries(s.store, pack_id, body.actor, adjustments))
+        except GateError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/proposals/quality")
+    def proposals_quality():
+        s = get_service()
+        return report_mod.proposal_quality(s.store)
 
     @app.post("/api/packs/{pack_id}/write-offs")
     def write_off(pack_id: str, body: WriteOffRequest):

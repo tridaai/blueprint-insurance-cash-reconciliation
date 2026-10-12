@@ -127,7 +127,12 @@
     <div id="rematch-result"></div>
     <div id="suspense"></div>
   </section>
-  <section id="tab-packs" class="hidden"><div id="packs"></div></section>
+  <section id="tab-packs" class="hidden">
+    <h3 style="margin-top:0">Model proposal quality</h3>
+    <p class="note">What the gate did with the model's proposals — graded by the approver's acts, not by anyone's say-so. An edit is a governed change to a proposed pack, recorded on the entry beside the original.</p>
+    <div id="quality"></div>
+    <div id="packs"></div>
+  </section>
   <section id="tab-audit" class="hidden"><div id="audit"></div></section>
 </main>
 
@@ -149,7 +154,7 @@ async function api(path, options) {
 function table(cols, rows) {
   if (!rows.length) return "<p class='note'>Nothing here yet.</p>";
   const head = cols.map(c => `<th class="${c.num ? 'num' : ''}">${c.label}</th>`).join("");
-  const body = rows.map(r => "<tr>" + cols.map(c => `<td class="${c.num ? 'num' : ''}">${c.render ? c.render(r) : (r[c.key] ?? "")}</td>`).join("") + "</tr>").join("");
+  const body = rows.map((r, ri) => "<tr>" + cols.map(c => `<td class="${c.num ? 'num' : ''}">${c.render ? c.render(r, ri) : (r[c.key] ?? "")}</td>`).join("") + "</tr>").join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 function setStatus(msg) { $("status").textContent = msg; }
@@ -247,6 +252,9 @@ async function loadClose() {
            {key: "allocation_total", label: "Allocations", num: 1, render: r => money(r.allocation_total)},
            {key: "write_off_total", label: "Write-offs", num: 1, render: r => money(r.write_off_total)},
            {label: "Flags", render: r => (r.flags || []).join(", ") || "—"}], p.packs_approved_in_month) +
+    ((p.proposal_quality && p.proposal_quality.totals.proposals) ? `<h3>Model proposal quality in the month</h3>` + table(
+      [{key: "k", label: "Kind"}, {key: "v", label: "Outcome split", num: 1}], Object.entries(p.proposal_quality.by_kind).map(([kind, s]) =>
+        ({k: kind, v: `${s.proposals} proposed · ${s.accepted_as_proposed} as proposed · ${s.accepted_with_edits} with edits · ${s.rejected} rejected · value edited ${money(s.value_edited)}`}))) : "") +
     ((p.payment_returns_in_month || []).length ? `<h3>Payment returns in the month</h3>` + table(
       [{key: "return_id", label: "Return"}, {key: "bank_line_id", label: "Bank line"}, {key: "reason", label: "Reason"},
        {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)}, {key: "return_date", label: "Returned"},
@@ -371,24 +379,71 @@ async function runRematch() {
     loadSuspense(); loadReport();
   } catch (e) { setStatus(e.message); }
 }
+async function loadQuality() {
+  const q = await api("/api/proposals/quality");
+  const rows = Object.entries(q.by_kind).map(([kind, s]) => ({kind, ...s}));
+  $("quality").innerHTML = rows.length ? table(
+    [{key: "kind", label: "Proposal kind"}, {key: "proposals", label: "Proposals", num: 1},
+     {key: "accepted_as_proposed", label: "Accepted as proposed", num: 1},
+     {key: "accepted_with_edits", label: "Accepted with edits", num: 1},
+     {key: "rejected", label: "Rejected (pack)", num: 1},
+     {key: "value_edited", label: "Value edited", num: 1, render: r => money(r.value_edited)}], rows)
+    + `<p class="note">Totals: ${q.totals.proposals} proposal(s), value edited ${money(q.totals.value_edited)}. The subject is the model's work; nobody is scored here.</p>`
+    : "<p class='note'>No decided packs carry model proposals yet.</p>";
+}
+async function editEntries(packId) {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — an edit is a named, approver-side act.");
+  const pack = await api(`/api/packs/${packId}`);
+  const adjustments = [];
+  for (;;) {
+    const raw = prompt(`Entry number to adjust in ${packId} (0–${pack.entries.length - 1}; blank to finish):`, "");
+    if (raw === null || raw.trim() === "") break;
+    const idx = Number(raw);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= pack.entries.length || pack.entries[idx].kind !== "allocation") {
+      setStatus(`Entry ${raw} is not an allocation entry.`); return;
+    }
+    const cur = pack.entries[idx].allocation;
+    const inst = prompt(`Entry ${idx}: ${cur.policy_number}/${cur.installment_id} ${money(cur.amount)}. New installment id (blank = keep):`, "");
+    const pol = prompt(`Entry ${idx}: new policy number (blank = keep ${cur.policy_number}):`, "");
+    const amt = prompt(`Entry ${idx}: new amount (blank = keep ${cur.amount}). The line's entries must still sum to the same total — pair a decrease with an increase, or the edit is refused:`, "");
+    const adj = {entry_index: idx};
+    if (inst) adj.new_installment = inst;
+    if (pol) adj.new_policy = pol;
+    if (amt) adj.new_amount = amt;
+    if (Object.keys(adj).length > 1) adjustments.push(adj);
+  }
+  if (!adjustments.length) return;
+  try {
+    await api(`/api/packs/${packId}/edit`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({actor: name, adjustments})});
+    setStatus(`${packId} edited by ${name} — the changes are on the entries, beside the originals.`);
+    loadPacks();
+  } catch (e) { setStatus("Edit refused: " + e.message); }
+}
 async function loadPacks() {
+  loadQuality().catch(() => {});
   const packs = await api("/api/packs");
   $("packs").innerHTML = packs.map(p => {
     const alloc = p.entries.filter(e => e.kind === "allocation").reduce((s, e) => s + Number(e.allocation.amount), 0);
     const wo = p.entries.filter(e => e.kind === "write_off").reduce((s, e) => s + Number(e.write_off_amount), 0);
     const actions = p.status === "proposed"
       ? `<button onclick="act('${p.pack_id}','approve')">Approve</button>
+         <button class="ghost" onclick="editEntries('${p.pack_id}')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Edit entries</button>
          <button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject</button>
          <a href="/api/packs/${p.pack_id}/posting-file">posting file</a>`
       : (p.status === "approved" ? `<a href="/api/packs/${p.pack_id}/posting-file">posting file (CSV)</a>` : "");
     return `<h3>${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span>${(p.flags || []).map(f => ` <span class="pill bad">${f}</span>`).join("")}</h3>
       <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}. Approvals: ${p.approvals.join(", ") || "—"}${(p.flags || []).includes("RETURN_AFFECTED") ? " A line in this pack was returned by the bank; the entries stand as approved and the reversal lives on the return record." : ""}</p>
       <p>${actions}</p>` +
-      table([{key: "kind", label: "Kind"},
+      table([{label: "#", render: (r, i) => i},
+             {key: "kind", label: "Kind"},
              {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.write_off_policy || "")},
              {label: "Installment / detail", render: r => r.allocation ? r.allocation.installment_id : ("write-off " + (r.write_off_exception_id || ""))},
              {label: "Amount", num: 1, render: r => money(r.allocation ? r.allocation.amount : r.write_off_amount)},
-             {label: "Tier", render: r => r.allocation ? (r.allocation.tier || "PROPOSED") + (r.auto_applied ? " · auto-appliable" : "") : ""}], p.entries);
+             {label: "Tier", render: r => r.allocation ? (r.allocation.tier || "PROPOSED") + (r.auto_applied ? " · auto-appliable" : "") : ""},
+             {label: "Proposal", render: r => r.proposal_kind ? `${r.proposal_kind.replace("_", " ")} · ${r.proposed_by || ""}` : "—"},
+             {label: "Edits at the gate", render: r => (r.edits || []).length ? r.edits.map(e => `${e.before_policy}/${e.before_installment} ${money(e.before_amount)} → ${e.after_policy}/${e.after_installment} ${money(e.after_amount)} (by ${e.by})`).join("; ") : "—"}], p.entries);
   }).join("") || "<p class='note'>No packs yet. Seed the month and run a day.</p>";
 }
 async function act(packId, kind) {

@@ -31,6 +31,7 @@ from .matcher import LineOutcome
 from .models import (
     Allocation,
     AuditEvent,
+    EntryEdit,
     InstallmentStatus,
     PolicyStatus,
     PostingEntry,
@@ -48,13 +49,129 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _proposal_kind(alloc: Allocation) -> str | None:
+    """Which model proposal an allocation stands on, if any. The
+    remittance tiers are the reader's reading made into allocations;
+    a tier-less allocation is the lump-sum proposer's subset. The
+    code tiers (T1–T3) are the matcher's own work — no proposal,
+    nothing to grade."""
+    if alloc.tier == Tier.T4_REMITTANCE:
+        return "remittance_read"
+    if alloc.tier is None:
+        return "lump_sum"
+    return None
+
+
 def assemble_pack(day, outcomes: list[LineOutcome], assembled_by: str, policy: PolicyConfig) -> PostingPack:
     pack = PostingPack(pack_id=f"PACK-{day.isoformat()}", value_date=day, assembled_by=assembled_by)
     for outcome in outcomes:
         line_total = outcome.allocated_total + outcome.suspense_amount
         for alloc in outcome.allocations:
             auto = alloc.tier == Tier.T1_EXACT and line_total <= policy.auto_apply_threshold
-            pack.entries.append(PostingEntry(kind="allocation", allocation=alloc, auto_applied=auto))
+            kind = _proposal_kind(alloc)
+            pack.entries.append(PostingEntry(
+                kind="allocation", allocation=alloc, auto_applied=auto,
+                proposal_kind=kind,
+                proposed_by=outcome.proposed_by if kind else None,
+            ))
+    return pack
+
+
+def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) -> PostingPack:
+    """Edit a PROPOSED pack's allocation entries at the gate, before
+    approval — the approver's correction of a proposal, on the
+    record. Each adjustment names an entry (by its index in the
+    pack) and may change its amount and/or its target installment
+    (and policy). The rules are the gate's usual kind:
+
+    - the pack must still be proposed; decided packs are history;
+    - the editor must be named and must not be the assembler —
+      editing is an approver-side act, and the editor is recorded
+      on every changed entry, beside the original it replaced;
+    - the new target must be a real open installment on the books;
+    - after all adjustments, the allocations for each bank line in
+      the pack must still sum to what they summed to before — an
+      edit redistributes a line's cash, it does not create or
+      destroy any; an edit that breaks a line's footing is refused
+      whole, with the line and both totals stated.
+
+    The store's allocation index follows the pack, so reports keep
+    describing the pack as it stands."""
+    pack = store.pack(pack_id)
+    if pack is None:
+        raise GateError(f"no such pack: {pack_id}")
+    if pack.status.value != "proposed":
+        raise GateError(f"pack {pack_id} is {pack.status.value}; only a proposed pack can be edited")
+    if not actor or actor == pack.assembled_by:
+        raise GateError("pack entries are edited by a named approver-side person, not the assembler")
+    if not adjustments:
+        raise GateError("an edit names at least one adjustment")
+
+    def line_totals(entries) -> dict[str, Decimal]:
+        totals: dict[str, Decimal] = {}
+        for e in entries:
+            if e.kind == "allocation" and e.allocation:
+                totals[e.allocation.bank_line_id] = (
+                    totals.get(e.allocation.bank_line_id, ZERO) + e.allocation.amount
+                )
+        return totals
+
+    before_totals = line_totals(pack.entries)
+    changes: list[str] = []
+    for adj in adjustments:
+        index = adj.get("entry_index")
+        if not isinstance(index, int) or not (0 <= index < len(pack.entries)):
+            raise GateError(f"adjustment names entry {index!r}; the pack has {len(pack.entries)} entries")
+        entry = pack.entries[index]
+        if entry.kind != "allocation" or not entry.allocation:
+            raise GateError(f"entry {index} of {pack_id} is not an allocation entry")
+        alloc = entry.allocation
+        new_policy = adj.get("new_policy") or alloc.policy_number
+        new_installment = adj.get("new_installment") or alloc.installment_id
+        new_amount = cents(adj["new_amount"]) if adj.get("new_amount") is not None else alloc.amount
+        if new_amount <= ZERO:
+            raise GateError(f"entry {index}: an allocation amount must be positive, not {new_amount}")
+        if (new_policy, new_installment, new_amount) == (alloc.policy_number, alloc.installment_id, alloc.amount):
+            continue  # names the entry but changes nothing — not an edit
+        rec = store.receivable(new_policy)
+        if rec is None:
+            raise GateError(f"entry {index}: no policy {new_policy} on the books")
+        inst = next((i for i in rec.installments if i.installment_id == new_installment), None)
+        if inst is None:
+            raise GateError(f"entry {index}: policy {new_policy} has no installment {new_installment}")
+        if inst.open_balance <= ZERO and new_installment != alloc.installment_id:
+            raise GateError(
+                f"entry {index}: installment {new_installment} of {new_policy} is already settled; "
+                "an edit cannot target settled work"
+            )
+        entry.edits.append(EntryEdit(
+            at=_now(), by=actor,
+            before_policy=alloc.policy_number, before_installment=alloc.installment_id,
+            before_amount=alloc.amount,
+            after_policy=new_policy, after_installment=new_installment, after_amount=new_amount,
+        ))
+        changes.append(
+            f"entry {index}: {alloc.policy_number}/{alloc.installment_id} {alloc.amount} "
+            f"→ {new_policy}/{new_installment} {new_amount}"
+        )
+        alloc.policy_number, alloc.installment_id, alloc.amount = new_policy, new_installment, new_amount
+
+    if not changes:
+        raise GateError("the edit changes nothing: every adjustment restates its entry")
+
+    after_totals = line_totals(pack.entries)
+    for line_id, before in before_totals.items():
+        after = after_totals.get(line_id, ZERO)
+        if after != before:
+            raise GateError(
+                f"the edit breaks the footing for bank line {line_id}: its allocations "
+                f"were {before} and would become {after}. Adjust the line's entries so "
+                "they still sum to the same total, or reject the pack instead."
+            )
+    store.save_pack(pack)
+    store.replace_allocations([e.allocation for e in pack.entries if e.allocation], pack_id)
+    store.audit(AuditEvent(at=_now(), actor=actor, action="pack_entry_edited", subject=pack_id,
+                           detail="; ".join(changes)))
     return pack
 
 

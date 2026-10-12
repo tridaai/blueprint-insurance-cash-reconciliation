@@ -19,7 +19,7 @@ from .llm import make_reader
 from .objects import make_object_store
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
-from .report import broker_scorecard, day_report
+from .report import broker_scorecard, day_report, proposal_quality
 from .returns import ReturnError, line_history, record_return
 from .workbench import WorkbenchError, add_handling_note, assign_exception, workbench_view
 from .statement import StatementImportError, import_statement
@@ -68,6 +68,7 @@ def main() -> None:
     nte.add_argument("exception_id")
     nte.add_argument("text")
     nte.add_argument("--actor", required=True)
+    sub.add_parser("quality", help="the model proposal quality report: what the gate did with the model's work")
     args = parser.parse_args()
 
     store, objects = make_store(), make_object_store()
@@ -127,6 +128,8 @@ def main() -> None:
         print(json.dumps(workbench_view(
             store, as_of, code=args.code, broker_id=args.broker,
             assignee=args.assignee, unassigned=args.unassigned), indent=2))
+    elif args.command == "quality":
+        print(json.dumps(proposal_quality(store), indent=2))
     elif args.command in ("assign", "note"):
         from .store import dump
 
