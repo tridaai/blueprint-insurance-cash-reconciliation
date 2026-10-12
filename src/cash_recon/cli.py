@@ -1,0 +1,48 @@
+"""Command line: seed and run days against the configured stores.
+
+With DATABASE_URL / S3_* set this works on the production stores;
+without them it uses the in-memory doubles (a demo, not the desk).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import date
+
+from .config import Policy as PolicyConfig
+from .dataset import build_dataset
+from .llm import make_reader
+from .objects import make_object_store
+from .pipeline import ingest_dataset, run_day
+from .report import day_report
+from .store import make_store
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="cash-recon")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("seed", help="load the synthetic Northgate dataset")
+    run = sub.add_parser("run", help="run one day through the pipeline")
+    run.add_argument("day", help="YYYY-MM-DD")
+    run.add_argument("--actor", default="cash-team")
+    rep = sub.add_parser("report", help="print a day's reconciliation report")
+    rep.add_argument("day", help="YYYY-MM-DD")
+    args = parser.parse_args()
+
+    store, objects = make_store(), make_object_store()
+    policy = PolicyConfig.from_env()
+    if args.command == "seed":
+        ds = build_dataset()
+        ingest_dataset(store, objects, ds)
+        print(f"seeded: {len(ds.receivables)} policies, {len(ds.bank_lines)} bank lines, "
+              f"{len(ds.remittances)} remittances")
+    elif args.command == "run":
+        result = run_day(store, objects, make_reader(), policy, date.fromisoformat(args.day), actor=args.actor)
+        print(json.dumps({"pack_id": result["pack_id"], "report": result["report"]}, indent=2))
+    elif args.command == "report":
+        print(json.dumps(day_report(store, date.fromisoformat(args.day), policy), indent=2))
+
+
+if __name__ == "__main__":
+    main()

@@ -23,7 +23,9 @@ import math
 import re
 
 EMBEDDING_DIM = 384
-NEAR_DUPLICATE_THRESHOLD = 0.985
+# Calibrated on the hashing embedder: a re-sent advice with a reworded
+# greeting scores ~0.97; an unrelated broker's advice scores ~0.64.
+NEAR_DUPLICATE_THRESHOLD = 0.95
 
 _INSTRUCTION_PATTERNS = [
     re.compile(r"\b(ignore|disregard)\b[^.]*\b(instruction|above|previous)\b", re.I),

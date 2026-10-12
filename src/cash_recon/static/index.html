@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Insurance Cash Reconciliation Agent — Trida AI Blueprint</title>
+<style>
+  :root { --ink:#0A0A0A; --accent:#4F46E5; --line:#E5E5EF; --muted:#5B5B6B; --bad:#B3261E; --ok:#137333; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Plus Jakarta Sans", system-ui, sans-serif; color:var(--ink); background:#fff; }
+  header { padding: 28px 32px 8px; }
+  .kicker { text-transform: uppercase; letter-spacing: .14em; font-size: 12px; color: var(--accent); font-weight: 700; }
+  h1 { margin: 6px 0 4px; font-size: 28px; }
+  .sub { color: var(--muted); max-width: 70ch; }
+  .bar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding: 14px 32px; border-bottom: 1px solid var(--line); }
+  .bar input, .bar button { font: inherit; padding: 7px 10px; border:1px solid var(--line); border-radius: 8px; background:#fff; }
+  .bar button { background: var(--accent); color:#fff; border-color: var(--accent); cursor:pointer; }
+  .bar button.ghost { background:#fff; color:var(--accent); }
+  nav { display:flex; gap:6px; padding: 12px 32px 0; }
+  nav button { font:inherit; padding: 7px 14px; border:1px solid var(--line); background:#fff; border-radius: 999px; cursor:pointer; }
+  nav button.active { background: var(--accent); color:#fff; border-color: var(--accent); }
+  main { padding: 18px 32px 40px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 22px; font-size: 14px; }
+  th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 7px 8px; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .cards { display:flex; gap:12px; flex-wrap:wrap; margin: 12px 0; }
+  .card { border:1px solid var(--line); border-radius: 12px; padding: 14px 18px; min-width: 170px; }
+  .card .v { font-size: 22px; font-weight: 700; }
+  .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+  .pill { display:inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; border:1px solid var(--line); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .note { color: var(--muted); font-size: 13px; }
+  footer { border-top: 1px solid var(--line); padding: 18px 32px 30px; display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+  footer a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker">Blueprints / Insurance</div>
+  <h1>Insurance Cash Reconciliation Agent</h1>
+  <p class="sub">Northgate Specialty Insurance (fictional). Premium cash is matched in tiers by code, the model reads remittances and proposes lump-sum allocations, and nothing posts without a named human at the gate.</p>
+</header>
+
+<div class="bar">
+  <label>Day <input type="date" id="day" value="2026-09-07"></label>
+  <label>Your name <input type="text" id="actor" value="cash-team" size="14"></label>
+  <button id="seed">Seed the synthetic month</button>
+  <button id="run">Run the day</button>
+  <span class="note" id="status"></span>
+</div>
+
+<nav>
+  <button data-tab="report" class="active">Day report</button>
+  <button data-tab="exceptions">Exceptions</button>
+  <button data-tab="suspense">Suspense aging</button>
+  <button data-tab="packs">Posting packs</button>
+  <button data-tab="audit">Audit trail</button>
+</nav>
+
+<main>
+  <section id="tab-report">
+    <div class="cards" id="cards"></div>
+    <p id="footing" class="note"></p>
+    <h3>By broker</h3><div id="bybroker"></div>
+    <h3>Exceptions raised this day</h3><div id="dayexceptions"></div>
+  </section>
+  <section id="tab-exceptions" class="hidden"><div id="exceptions"></div></section>
+  <section id="tab-suspense" class="hidden"><div id="suspense"></div></section>
+  <section id="tab-packs" class="hidden"><div id="packs"></div></section>
+  <section id="tab-audit" class="hidden"><div id="audit"></div></section>
+</main>
+
+<footer>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI" width="40">
+  <span>An open blueprint from Trida AI — reference prototype, synthetic data only.</span>
+  <a href="https://trida.ai">Visit Trida AI →</a>
+  <a href="https://trida.ai/blog?category=blueprints">View all blueprints →</a>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (v) => Number(v).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (!res.ok) { const body = await res.json().catch(() => ({})); throw new Error(body.detail || res.statusText); }
+  return res.json();
+}
+function table(cols, rows) {
+  if (!rows.length) return "<p class='note'>Nothing here yet.</p>";
+  const head = cols.map(c => `<th class="${c.num ? 'num' : ''}">${c.label}</th>`).join("");
+  const body = rows.map(r => "<tr>" + cols.map(c => `<td class="${c.num ? 'num' : ''}">${c.render ? c.render(r) : (r[c.key] ?? "")}</td>`).join("") + "</tr>").join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+function setStatus(msg) { $("status").textContent = msg; }
+
+async function loadReport() {
+  const day = $("day").value;
+  const rep = await api(`/api/days/${day}/report`);
+  $("cards").innerHTML = [
+    ["Bank total", rep.bank_total], ["Allocated", rep.allocated_total],
+    ["Posted (approved)", rep.posted_total], ["In suspense", rep.suspense_total],
+    ["Bank lines", rep.bank_lines]
+  ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${typeof v === "number" ? v : money(v)}</div></div>`).join("");
+  $("footing").innerHTML = `<span class="pill ${rep.footing_ok ? "ok" : "bad"}">${rep.footing_ok ? "Reconciled" : "NOT reconciled"}</span> ${rep.footing_note}`;
+  $("bybroker").innerHTML = table(
+    [{key: "broker", label: "Broker / book"}, {key: "bank", label: "Bank", num: 1}, {key: "allocated", label: "Allocated", num: 1}, {key: "suspense", label: "Suspense", num: 1}],
+    Object.entries(rep.by_broker).map(([broker, v]) => ({broker, ...v})));
+  $("dayexceptions").innerHTML = exceptionTable(rep.exceptions);
+}
+function exceptionTable(rows) {
+  return table(
+    [{key: "code", label: "Code", render: r => `<span class="pill bad">${r.code}</span>`},
+     {key: "bank_line_id", label: "Bank line"}, {key: "policy_number", label: "Policy"},
+     {key: "amount", label: "Amount at issue", num: 1, render: r => money(r.amount)},
+     {key: "detail", label: "Detail"}, {key: "status", label: "Status"}], rows);
+}
+async function loadExceptions() {
+  $("exceptions").innerHTML = exceptionTable(await api("/api/exceptions"));
+}
+async function loadSuspense() {
+  const buckets = await api(`/api/suspense?as_of=${$("day").value}`);
+  $("suspense").innerHTML = buckets.map(b => `<h3>${b.bucket} — ${money(b.total)} (${b.count})</h3>` +
+    table([{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+           {key: "received_date", label: "Received"}, {key: "age_days", label: "Age (days)", num: 1}, {key: "reason", label: "Reason"}], b.items)).join("");
+}
+async function loadPacks() {
+  const packs = await api("/api/packs");
+  $("packs").innerHTML = packs.map(p => {
+    const alloc = p.entries.filter(e => e.kind === "allocation").reduce((s, e) => s + Number(e.allocation.amount), 0);
+    const wo = p.entries.filter(e => e.kind === "write_off").reduce((s, e) => s + Number(e.write_off_amount), 0);
+    const actions = p.status === "proposed"
+      ? `<button onclick="act('${p.pack_id}','approve')">Approve</button>
+         <button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject</button>
+         <a href="/api/packs/${p.pack_id}/posting-file">posting file</a>`
+      : (p.status === "approved" ? `<a href="/api/packs/${p.pack_id}/posting-file">posting file (CSV)</a>` : "");
+    return `<h3>${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span></h3>
+      <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}. Approvals: ${p.approvals.join(", ") || "—"}</p>
+      <p>${actions}</p>` +
+      table([{key: "kind", label: "Kind"},
+             {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.write_off_policy || "")},
+             {label: "Installment / detail", render: r => r.allocation ? r.allocation.installment_id : ("write-off " + (r.write_off_exception_id || ""))},
+             {label: "Amount", num: 1, render: r => money(r.allocation ? r.allocation.amount : r.write_off_amount)},
+             {label: "Tier", render: r => r.allocation ? (r.allocation.tier || "PROPOSED") + (r.auto_applied ? " · auto-appliable" : "") : ""}], p.entries);
+  }).join("") || "<p class='note'>No packs yet. Seed the month and run a day.</p>";
+}
+async function act(packId, kind) {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — the gate is named, never anonymous.");
+  try {
+    if (kind === "approve") {
+      const second = prompt("Second approver (only needed when write-offs exceed the single limit; leave empty otherwise):", "");
+      await api(`/api/packs/${packId}/approve`, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({approver: name, second_approver: second || null})});
+    } else {
+      const reason = prompt("Reason for rejection (goes on the record):", "");
+      if (!reason) return;
+      await api(`/api/packs/${packId}/reject`, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({actor: name, reason})});
+    }
+    setStatus(`${packId} ${kind === "approve" ? "approved" : "rejected"} by ${name}.`);
+    loadPacks(); loadReport();
+  } catch (e) { setStatus("Gate refused: " + e.message); }
+}
+async function loadAudit() {
+  const events = await api("/api/audit");
+  $("audit").innerHTML = table(
+    [{key: "at", label: "At"}, {key: "actor", label: "Actor"}, {key: "action", label: "Action"},
+     {key: "subject", label: "Subject"}, {key: "detail", label: "Detail"}], events.slice().reverse());
+}
+const loaders = {report: loadReport, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  document.querySelectorAll("main section").forEach(s => s.classList.add("hidden"));
+  $("tab-" + btn.dataset.tab).classList.remove("hidden");
+  loaders[btn.dataset.tab]().catch(e => setStatus(e.message));
+}));
+$("seed").addEventListener("click", async () => {
+  try { const r = await api("/api/seed", {method: "POST"}); setStatus(`Seeded ${r.policies} policies, ${r.bank_lines} bank lines, ${r.remittances} remittances.`); loadReport(); }
+  catch (e) { setStatus(e.message); }
+});
+$("run").addEventListener("click", async () => {
+  try {
+    const r = await api(`/api/days/${$("day").value}/run`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({actor: $("actor").value || "cash-team"})});
+    setStatus(`Ran ${r.day}: ${r.pack_id ? "pack " + r.pack_id + " assembled for the gate" : "no pack (no bank lines)"}.`);
+    loadReport();
+  } catch (e) { setStatus(e.message); }
+});
+loadReport().catch(() => setStatus("Seed the synthetic month to begin."));
+</script>
+</body>
+</html>
