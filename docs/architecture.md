@@ -68,6 +68,21 @@ installments. Overpaying the next installment parks the excess in
 suspense as OVERPAID rather than silently consuming future
 installments nobody billed yet.
 
+**Installment-aware allocation.** Each installment is its own open
+item (sequence, due date, own balance), and `open_installments()`
+guarantees sequence order — the allocation order is a property of
+the record, not of storage order. The structured reference is the
+only instruction channel: a reference naming an installment
+(`NSP-1003-I3`) routes the cash to that installment first, with any
+remainder flowing to the oldest open installment after it and the
+flow written onto the allocations and the outcome notes. Free text
+is never an instruction: a narrative indicating a later installment
+leaves the allocation exactly where the rule puts it (oldest first)
+and adds an INTENT_DIFFERS exception record — amount applied
+elsewhere, in words — so the desk sees the difference without the
+money being held hostage to it. A named installment that is already
+settled takes the same path: fall back to the rule, flag the intent.
+
 **Netting mismatch vs partial.** Both are "less than expected". The
 distinguishing test is the implied commission rate: if
 `(gross − received) / gross` is a clean rate (to a tenth of a percent)
@@ -125,6 +140,44 @@ through without an exception, and what the broker's rate mistakes
 cost in held cash. The drafted query notes hang off the row they
 belong to. Nothing in it ranks people or contacts anyone.
 
+**The close pack is a read model over the suspense ledger.** The
+month-end pack (`close_pack.py`) rolls suspense, not cash in
+general: opening + received into suspense − applied from suspense =
+closing. To make that checkable rather than asserted, each item's
+position is reconstructed from the records — the amount that
+entered suspense when its line was worked (bank amount less the
+day packs' allocations for the line) less what re-match packs have
+released since, by pack value date. The roll closing and the
+reconstructed closing are two computations of one number; a
+disagreement, or an item whose bank line is missing, makes the pack
+say NOT FOOTED and name the difference and the item. Approved
+write-offs are a control line of their own: in this system a
+write-off disposes a receivable delta (a partial shortfall, a
+netting delta), never suspense cash, so netting it into the
+suspense identity would make the roll lie. The pack body is
+canonical and wall-clock-free; its SHA-256 digest covers the body,
+and the JSON export and text rendering are two views of it.
+Assembling a pack mutates nothing — closing a month is a report,
+not a lock, and there is deliberately no "closed period" state
+anywhere in the stores.
+
+**Statements arrive as files, imported whole or not at all.** The
+importer (`statement.py`) recognises a generic bank CSV by a small
+column-alias config — debit/credit pair or one signed amount — and
+emits the same `BankLine` records the tiers consume, through the
+existing store port (no new persistence, so the conformance battery
+is untouched). Parsing completes before the first store write, and
+trailer controls (CONTROL TOTAL / CONTROL COUNT) are checked
+against the parsed credits and row count, so a refused import
+leaves the books exactly as they were. Dedupe is structural: the
+imported line's id is a digest of the dedupe key (bank reference +
+amount + value date), so a re-import meets the same ids in the
+store and reports them as already-seen instead of storing twins.
+The statement's own reference column reaches `BankLine.reference`
+only when it carries a policy number — otherwise it would break the
+matcher's "no reference" signal for remittance-led lines, and the
+policy reference is found in the description text as usual.
+
 ## Stores
 
 - **PostgreSQL** (production): one table per record type, payloads as
@@ -169,7 +222,8 @@ Store selection is `DATABASE_URL` (PostgreSQL) or `SQLITE_PATH`
 
 ## What v1 deliberately does not do
 
-No bank feeds (lines arrive as data), no general-ledger integration
+No live bank feeds (statements arrive as files and are imported;
+nothing polls a bank), no general-ledger integration
 (the approved pack's CSV is the hand-off), no payment execution, no
 claims or reinsurance cash — premium cash application for one
 carrier. Auto-application exists only as a *mark* on small exact

@@ -67,7 +67,7 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (34 cases, gold by construction)
+make evals       # the golden-case gate (38 cases, gold by construction)
 make serve       # API + console on http://localhost:8000
 ```
 
@@ -126,6 +126,42 @@ tier runs.
 Every line ends fully accounted for, and the matcher asserts it:
 **allocations + suspense == the bank amount, to the cent.**
 
+## Installments, worked one by one
+
+Each installment is its own open item, with its own due date and
+sequence number, and the allocation order is code, stated on the
+record: cash identified for a policy applies to the **oldest open
+installment first**. The one exception is a payer whose structured
+reference names a specific installment (`NSP-1003-I3`): that
+installment is settled first, and any remainder flows to the oldest
+open installment after it, with the flow written on the allocations.
+A free-text note indicating a different installment ("for installment
+2") is not an instruction — the cash still applies oldest-first, and
+the outcome carries an **INTENT_DIFFERS** flag so the desk sees the
+payer's apparent intent differed. Money is never left sitting in
+suspense over a guess about intent. Overpaying the policy's whole
+remaining balance stays an OVERPAID exception, as before.
+
+## Bringing in bank statements
+
+Lines do not have to arrive in the dataset's own shape. A statement
+importer (`POST /api/statements/import`, `cash-recon
+import-statement`, or the console's Statement import tab) takes the
+generic CSV a bank exports — date, description, reference, and
+either a debit/credit pair or one signed amount, with the column
+mapping a small alias config in code — and converts it into the same
+bank-line records the tiers consume. Imported lines are
+indistinguishable downstream. The import is all-or-nothing: every
+row parses before anything is stored, and when the file carries
+trailer controls (a `CONTROL TOTAL` / `CONTROL COUNT` row) the
+parsed credits and row count must equal them exactly or the whole
+import is refused with the discrepancy stated. Re-importing the same
+statement cannot double-apply cash: each line's id is a digest of
+its dedupe key — bank reference + amount + value date — so
+already-seen lines are reported as skipped. Only credits are
+imported; debit rows are counted and left behind. A worked example
+ships at `data/example-statement.csv`.
+
 ## Exceptions
 
 Each carries a reason code, the amount at issue, and an aging clock:
@@ -172,6 +208,29 @@ call the day reconciled. Suspense is aged in buckets (0–7, 8–30,
 re-match pass is shown as its own line for the day the recovery ran,
 by bank line — never folded silently into the day's allocations.
 
+## The month-end close pack
+
+The month gets the control the day gets, at period scale (console
+Month close tab, `GET /api/close/{YYYY-MM}` + `/text`,
+`cash-recon close`). The control roll runs over the suspense
+ledger: opening suspense (aged, by bucket) + cash received into
+suspense in the month − applied from suspense = closing suspense,
+with every item's position reconstructed from the records so the
+closing figure cross-checks against the ledger itself. If the two
+disagree, or an item cannot be traced to a bank line, the pack says
+**NOT FOOTED** in words and names the difference. The pack assembles
+every posting pack approved for the month (with its approvers),
+every exception opened in the month and every one closed by month
+end with its disposition, suspense aging at month end, and the
+broker scorecard scoped to the month. Approved write-offs stand in
+the roll as their own control line: they dispose of receivable
+deltas, not of suspense cash, so they are reported, never netted
+into the suspense identity. Export is one JSON plus a human-readable
+text rendering of the same body, with a SHA-256 digest over it —
+the body carries no wall-clock stamps, so a pack regenerated from
+unchanged books is byte-identical. Assembling the pack changes
+nothing: closing a month here is a report, not a lock.
+
 ## The broker scorecard
 
 A read model over everything on the books, one row per broker
@@ -204,13 +263,18 @@ paperwork, never people, and it sends nothing.
 ## Evals
 
 `make evals` runs the synthetic month through the real pipeline and
-scores 34 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 38 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
-the correct code), and controls (every day foots; the opening
-suspense ages into the right buckets; the broker scorecard's money
-foots to the daily reports). The runner prints a
+the correct code), the installment cases (a named installment
+settles the named one; a note indicating a later installment applies
+oldest-first under INTENT_DIFFERS), and controls (every day foots;
+the opening suspense ages into the right buckets; the broker
+scorecard's money foots to the daily reports; the September close
+pack foots with a stable digest; the example statement imports
+cleanly, dedupes on re-import, and a tampered control total is
+refused). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
@@ -230,6 +294,8 @@ src/cash_recon/
   documents.py   the document screen + near-duplicate detection
   gate.py        packs, approvals, write-offs, the posting file
   report.py      the daily reconciliation report, suspense aging, the broker scorecard
+  close_pack.py  the month-end close pack: control roll, digest, JSON + text export
+  statement.py   the bank statement importer: generic CSV in, bank lines out
   pipeline.py    the day run as a LangGraph graph
   rematch.py     the suspense re-match pass: late information, same tiers, same gate
   store.py       Postgres (production) / SQLite (local) / in-memory (tests)
@@ -243,8 +309,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 65 tests,
-34/34 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 92 tests,
+38/38 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, and the offline fallback is what the demo and the
