@@ -20,6 +20,7 @@ from .objects import make_object_store
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
 from .report import broker_scorecard, day_report
+from .statement import StatementImportError, import_statement
 from .store import make_store
 
 
@@ -40,6 +41,8 @@ def main() -> None:
     clo = sub.add_parser("close", help="print a month-end close pack (a report, not a lock)")
     clo.add_argument("month", help="YYYY-MM")
     clo.add_argument("--format", choices=("json", "text"), default="json")
+    imp = sub.add_parser("import-statement", help="import a generic bank statement CSV")
+    imp.add_argument("path", help="path to the statement CSV")
     args = parser.parse_args()
 
     store, objects = make_store(), make_object_store()
@@ -68,6 +71,16 @@ def main() -> None:
             print(render_close_pack_text(export), end="")
         else:
             print(json.dumps(export, indent=2))
+    elif args.command == "import-statement":
+        from pathlib import Path
+
+        try:
+            report = import_statement(
+                store, Path(args.path).read_text(), source_name=Path(args.path).name
+            )
+        except StatementImportError as exc:
+            parser.exit(1, f"import refused: {exc}\n")
+        print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

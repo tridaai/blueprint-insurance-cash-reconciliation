@@ -27,6 +27,7 @@ from .logging_setup import configure_logging, new_request_id
 from .objects import ObjectStore, make_object_store
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
+from .statement import StatementImportError, import_statement
 from .store import Store, dump, make_store
 
 log = logging.getLogger("cash_recon.api")
@@ -55,6 +56,11 @@ class WriteOffRequest(BaseModel):
 class RematchRequest(BaseModel):
     actor: str = "cash-team"
     as_of: date | None = None
+
+
+class StatementImportRequest(BaseModel):
+    text: str
+    source_name: str = "statement"
 
 
 def present(model) -> dict:
@@ -146,6 +152,14 @@ def create_app(service: Service | None = None) -> FastAPI:
     def day_report(day: date):
         s = get_service()
         return report_mod.day_report(s.store, day, s.policy)
+
+    @app.post("/api/statements/import")
+    def import_stmt(body: StatementImportRequest):
+        s = get_service()
+        try:
+            return import_statement(s.store, body.text, body.source_name)
+        except StatementImportError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/exceptions")
     def exceptions(status: str | None = None):

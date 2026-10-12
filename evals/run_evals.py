@@ -115,6 +115,16 @@ def golden_rows() -> list[dict]:
             "digest_stable": True,
         },
     })
+    rows.append({
+        "case": "IMPORT-EXAMPLE", "kind": "import",
+        "expect": {
+            "imported": 4, "skipped_duplicates": 0, "debit_rows_skipped": 1,
+            "credits_total": "13837.60",
+            "reimport_imported": 0, "reimport_skipped": 4,
+            "lines_on_books": 4, "mismatch_refused": True,
+            "lines_after_refusal": 4,
+        },
+    })
     return rows
 
 
@@ -229,6 +239,41 @@ def rematch_scenarios() -> dict[str, dict]:
     return {"REMATCH-LATE-ADVICE": late_advice, "REMATCH-STAYS-OPEN": stays_open}
 
 
+def import_scenario() -> dict:
+    """The shipped example statement, imported into a books-only
+    store: clean import, dedupe on re-import, and a tampered control
+    total refused with nothing further stored."""
+    from pathlib import Path
+
+    from cash_recon.statement import StatementImportError, import_statement
+
+    ds = build_dataset()
+    store = InMemoryStore()
+    for b in ds.brokers:
+        store.upsert_broker(b)
+    for r in ds.receivables:
+        store.upsert_receivable(r)
+    text = (Path(__file__).parent.parent / "data" / "example-statement.csv").read_text()
+    first = import_statement(store, text, "example-statement.csv")
+    second = import_statement(store, text, "example-statement.csv")
+    refused = False
+    try:
+        import_statement(store, text.replace("13837.60", "13837.61"), "tampered.csv")
+    except StatementImportError:
+        refused = True
+    return {
+        "imported": first["imported"],
+        "skipped_duplicates": first["skipped_duplicates"],
+        "debit_rows_skipped": first["debit_rows_skipped"],
+        "credits_total": first["credits_total"],
+        "reimport_imported": second["imported"],
+        "reimport_skipped": second["skipped_duplicates"],
+        "lines_on_books": len(store.bank_lines()),
+        "mismatch_refused": refused,
+        "lines_after_refusal": len(store.bank_lines()),
+    }
+
+
 def score(rows: list[dict]) -> tuple[int, int, list[str]]:
     _ds, store, outcomes, reports = run_pipeline()
     packs = {p.pack_id: p for p in store.packs()}
@@ -326,6 +371,17 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 if broker_id == "foots_to_daily_reports":
                     continue
                 observed[broker_id] = {k: card[broker_id][k] for k in fields}
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "import":
+            observed = import_scenario()
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()

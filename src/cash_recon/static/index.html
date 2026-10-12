@@ -54,6 +54,7 @@
 
 <nav>
   <button data-tab="report" class="active">Day report</button>
+  <button data-tab="import">Statement import</button>
   <button data-tab="close">Month close</button>
   <button data-tab="scorecard">Broker scorecard</button>
   <button data-tab="exceptions">Exceptions</button>
@@ -69,6 +70,16 @@
     <h3>By broker</h3><div id="bybroker"></div>
     <h3>Re-match recoveries this day</h3><div id="rematchreport"></div>
     <h3>Exceptions raised this day</h3><div id="dayexceptions"></div>
+  </section>
+  <section id="tab-import" class="hidden">
+    <p class="note">Paste a bank statement CSV (date, description, reference, and either debit/credit columns or one signed amount), or choose the file. Trailer controls — a CONTROL TOTAL / CONTROL COUNT row — are checked exactly; a mismatch refuses the whole import. Re-importing the same statement skips lines already seen (bank reference + amount + date), so cash can never be applied twice.</p>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
+      <input type="file" id="import-file" accept=".csv,text/csv,text/plain">
+      <button id="import-go" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer">Import statement</button>
+      <span class="note" id="import-status"></span>
+    </div>
+    <textarea id="import-text" rows="10" style="width:100%; font-family:ui-monospace, monospace; font-size:13px; border:1px solid var(--line); border-radius:8px; padding:10px" placeholder="Date,Description,Reference,Debit,Credit&#10;2026-09-23,Marigold Catering Co — premium NSP-1001,TXN-9001,,4800.00"></textarea>
+    <div id="import-result"></div>
   </section>
   <section id="tab-close" class="hidden">
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
@@ -144,6 +155,22 @@ function exceptionTable(rows) {
      {key: "bank_line_id", label: "Bank line"}, {key: "policy_number", label: "Policy"},
      {key: "amount", label: "Amount at issue", num: 1, render: r => money(r.amount)},
      {key: "detail", label: "Detail"}, {key: "status", label: "Status"}], rows);
+}
+async function runImport() {
+  const text = $("import-text").value;
+  if (!text.trim()) return ($("import-status").textContent = "Paste a statement or choose a file first.");
+  try {
+    const r = await api("/api/statements/import", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text, source_name: "console"})});
+    $("import-status").textContent = `Imported ${r.imported} line(s); ${r.skipped_duplicates} already seen; ${r.debit_rows_skipped} debit row(s) skipped.`;
+    $("import-result").innerHTML = table(
+      [{key: "k", label: "Line"}, {key: "v", label: "Value"}], [
+        {k: "Data rows parsed", v: r.data_rows}, {k: "Credit rows", v: r.credit_rows},
+        {k: "Credits total", v: money(r.credits_total)},
+        {k: "Control total in file", v: r.control_total === null ? "—" : money(r.control_total)},
+        {k: "Control count in file", v: r.control_count === null ? "—" : r.control_count},
+        {k: "Imported", v: r.imported}, {k: "Skipped as already seen", v: r.skipped_duplicates}]);
+  } catch (e) { $("import-status").textContent = "Import refused: " + e.message; $("import-result").innerHTML = ""; }
 }
 async function loadClose() {
   const month = $("close-month").value;
@@ -282,8 +309,13 @@ async function loadAudit() {
     [{key: "at", label: "At"}, {key: "actor", label: "Actor"}, {key: "action", label: "Action"},
      {key: "subject", label: "Subject"}, {key: "detail", label: "Detail"}], events.slice().reverse());
 }
-const loaders = {report: loadReport, close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+const loaders = {report: loadReport, import: () => Promise.resolve(), close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
 $("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
+$("import-go").addEventListener("click", runImport);
+$("import-file").addEventListener("change", async (ev) => {
+  const file = ev.target.files[0];
+  if (file) $("import-text").value = await file.text();
+});
 document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
   document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
