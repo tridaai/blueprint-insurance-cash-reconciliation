@@ -37,6 +37,19 @@ from .money import cents, net_of
 
 D = Decimal
 
+# The cash team's roster: the named people an exception can be
+# assigned to on the workbench. (The gate takes its assembler and
+# approver names as free strings — packs belong to whoever staffed
+# the desk that day — but assignment is a standing responsibility,
+# so it is validated against this list.)
+TEAM_ROSTER = [
+    "Priya Nair",
+    "Daniel Okafor",
+    "Mei-Ling Chen",
+    "Tom Alvarez",
+    "Sofia Marino",
+]
+
 BROKER_SPECS = [
     ("BRK-ALDER", "Alder & Voss Insurance Brokers", D("0.125")),
     ("BRK-BAYLINE", "Bayline Risk Partners", D("0.10")),

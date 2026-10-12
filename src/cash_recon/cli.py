@@ -21,6 +21,7 @@ from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
 from .report import broker_scorecard, day_report
 from .returns import ReturnError, line_history, record_return
+from .workbench import WorkbenchError, add_handling_note, assign_exception, workbench_view
 from .statement import StatementImportError, import_statement
 from .store import make_store
 
@@ -53,6 +54,20 @@ def main() -> None:
                      help="amount the bank returned; anything but the full line amount is refused")
     hist = sub.add_parser("history", help="one bank line's whole chain: application, return, re-application")
     hist.add_argument("bank_line_id")
+    wb = sub.add_parser("workbench", help="the exception workbench: the open queue, oldest first, counts that foot")
+    wb.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
+    wb.add_argument("--code", default=None)
+    wb.add_argument("--broker", default=None)
+    wb.add_argument("--assignee", default=None)
+    wb.add_argument("--unassigned", action="store_true")
+    asg = sub.add_parser("assign", help="assign an open exception to a rostered team member")
+    asg.add_argument("exception_id")
+    asg.add_argument("assignee")
+    asg.add_argument("--actor", required=True)
+    nte = sub.add_parser("note", help="append a dated handling note to an exception (append-only)")
+    nte.add_argument("exception_id")
+    nte.add_argument("text")
+    nte.add_argument("--actor", required=True)
     args = parser.parse_args()
 
     store, objects = make_store(), make_object_store()
@@ -107,6 +122,22 @@ def main() -> None:
         print(json.dumps(json.loads(dump(recorded)), indent=2))
     elif args.command == "history":
         print(json.dumps(line_history(store, args.bank_line_id), indent=2))
+    elif args.command == "workbench":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        print(json.dumps(workbench_view(
+            store, as_of, code=args.code, broker_id=args.broker,
+            assignee=args.assignee, unassigned=args.unassigned), indent=2))
+    elif args.command in ("assign", "note"):
+        from .store import dump
+
+        try:
+            if args.command == "assign":
+                exc = assign_exception(store, args.exception_id, args.assignee, args.actor)
+            else:
+                exc = add_handling_note(store, args.exception_id, args.actor, args.text)
+        except WorkbenchError as exc_err:
+            parser.exit(1, f"workbench refused: {exc_err}\n")
+        print(json.dumps(json.loads(dump(exc)), indent=2))
 
 
 if __name__ == "__main__":

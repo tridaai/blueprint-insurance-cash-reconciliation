@@ -161,6 +161,16 @@ class Allocation(BaseModel):
     note: str = ""
 
 
+class HandlingNote(BaseModel):
+    """One dated handling note on an exception. Notes are appended,
+    never edited or deleted — what the desk knew, and when, is part
+    of the exception's record."""
+
+    at: datetime
+    by: str
+    text: str
+
+
 class ExceptionRecord(BaseModel):
     exception_id: str
     code: ExceptionCode
@@ -172,6 +182,12 @@ class ExceptionRecord(BaseModel):
     first_seen: date
     status: str = "open"  # open | resolved | written_off
     proposed_by: str | None = None  # model/backend that proposed, if any
+    # Handling metadata for the workbench: who has it, and the running
+    # notes. Assignment and notes never change the amount, the code,
+    # or the disposition — those move only through the governed
+    # paths (the gate, a re-match, a recorded return).
+    assignee: str | None = None
+    handling_notes: list[HandlingNote] = Field(default_factory=list)
 
 
 class SuspenseItem(BaseModel):

@@ -30,6 +30,7 @@ from .rematch import rematch_suspense
 from .returns import ReturnError, line_history, record_return
 from .statement import StatementImportError, import_statement
 from .store import Store, dump, make_store
+from .workbench import WorkbenchError, add_handling_note, assign_exception, workbench_view
 
 log = logging.getLogger("cash_recon.api")
 STATIC = Path(__file__).parent / "static"
@@ -62,6 +63,16 @@ class RematchRequest(BaseModel):
 class StatementImportRequest(BaseModel):
     text: str
     source_name: str = "statement"
+
+
+class AssignRequest(BaseModel):
+    assignee: str
+    actor: str
+
+
+class NoteRequest(BaseModel):
+    actor: str
+    text: str
 
 
 class ReturnRequest(BaseModel):
@@ -173,6 +184,32 @@ def create_app(service: Service | None = None) -> FastAPI:
     def exceptions(status: str | None = None):
         s = get_service()
         return [present(e) for e in s.store.exceptions(status=status)]
+
+    @app.get("/api/workbench")
+    def workbench(as_of: date | None = None, code: str | None = None,
+                  broker_id: str | None = None, assignee: str | None = None,
+                  unassigned: bool = False):
+        s = get_service()
+        return workbench_view(
+            s.store, as_of or date.today(), code=code, broker_id=broker_id,
+            assignee=assignee, unassigned=unassigned,
+        )
+
+    @app.post("/api/exceptions/{exception_id}/assign")
+    def assign(exception_id: str, body: AssignRequest):
+        s = get_service()
+        try:
+            return present(assign_exception(s.store, exception_id, body.assignee, body.actor))
+        except WorkbenchError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/exceptions/{exception_id}/notes")
+    def add_note(exception_id: str, body: NoteRequest):
+        s = get_service()
+        try:
+            return present(add_handling_note(s.store, exception_id, body.actor, body.text))
+        except WorkbenchError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/suspense")
     def suspense(as_of: date | None = None):

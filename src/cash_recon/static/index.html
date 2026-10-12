@@ -57,7 +57,7 @@
   <button data-tab="import">Statement import</button>
   <button data-tab="close">Month close</button>
   <button data-tab="scorecard">Broker scorecard</button>
-  <button data-tab="exceptions">Exceptions</button>
+  <button data-tab="exceptions">Workbench</button>
   <button data-tab="suspense">Suspense aging</button>
   <button data-tab="packs">Posting packs</button>
   <button data-tab="audit">Audit trail</button>
@@ -106,7 +106,19 @@
     <p class="note">Per broker, over everything on the books: how their cash arrives, how cleanly their netting settles, and what is still open against them. The money columns are the daily reports' by-broker split, summed. Query notes are drafts the system wrote for review — nothing here sends anything.</p>
     <div id="scorecard"></div>
   </section>
-  <section id="tab-exceptions" class="hidden"><div id="exceptions"></div></section>
+  <section id="tab-exceptions" class="hidden">
+    <p class="note">The open exception queue, oldest first — who has each item, and what the desk has noted on it. Assignment and notes are handling metadata only: amounts, codes and dispositions never change here. Dispositions happen at the gate, in a re-match, or by recording a return. Notes are append-only.</p>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:6px">
+      <label>Code <select id="wb-code" style="font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:8px"><option value="">all</option></select></label>
+      <label>Broker <input type="text" id="wb-broker" size="12" placeholder="BRK-…"></label>
+      <label>Assignee <select id="wb-assignee" style="font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:8px"><option value="">all</option></select></label>
+      <label><input type="checkbox" id="wb-unassigned"> Unassigned only</label>
+      <button id="wb-filter" style="font:inherit; padding:6px 12px; border:1px solid var(--accent); border-radius:8px; background:#fff; color:var(--accent); cursor:pointer">Filter</button>
+      <span class="note" id="wb-status"></span>
+    </div>
+    <div id="wb-counts" style="margin:8px 0"></div>
+    <div id="exceptions"></div>
+  </section>
   <section id="tab-suspense" class="hidden">
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
       <button id="rematch" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer">Re-match open suspense</button>
@@ -278,8 +290,59 @@ async function loadScorecard() {
        {label: "Open exceptions", render: () => open}], [r]) + notes;
   }).join("") || "<p class='note'>No brokers yet. Seed the synthetic month.</p>";
 }
+let wbRoster = [];
 async function loadExceptions() {
-  $("exceptions").innerHTML = exceptionTable(await api("/api/exceptions"));
+  const params = new URLSearchParams({as_of: $("day").value});
+  if ($("wb-code").value) params.set("code", $("wb-code").value);
+  if ($("wb-broker").value.trim()) params.set("broker_id", $("wb-broker").value.trim());
+  if ($("wb-assignee").value) params.set("assignee", $("wb-assignee").value);
+  if ($("wb-unassigned").checked) params.set("unassigned", "true");
+  const view = await api(`/api/workbench?${params}`);
+  wbRoster = view.roster;
+  if (!$("wb-code").options.length || $("wb-code").options.length === 1) {
+    $("wb-code").innerHTML = "<option value=''>all</option>" + Object.keys(view.counts_by_code).map(c => `<option>${c}</option>`).join("");
+    $("wb-assignee").innerHTML = "<option value=''>all</option>" + view.roster.map(n => `<option>${n}</option>`).join("");
+  }
+  $("wb-counts").innerHTML =
+    `<span class="pill">${view.total_open} open — ${money(view.total_amount)}</span> ` +
+    Object.entries(view.counts_by_code).map(([code, v]) => `<span class="pill bad">${code} ×${v.count} — ${money(v.amount)}</span>`).join(" ") +
+    (view.filtered_count !== view.total_open ? ` <span class="note">showing ${view.filtered_count} after filters</span>` : "");
+  $("exceptions").innerHTML = view.rows.length ? `<table><thead><tr><th>Code</th><th>Bank line</th><th>Policy</th><th class="num">Amount</th><th>First seen</th><th class="num">Age (days)</th><th>Assignee</th><th>Notes</th><th>Handling</th></tr></thead><tbody>` +
+    view.rows.map(r => `<tr>
+      <td><span class="pill bad">${r.code}</span><div class="note">${r.detail}</div></td>
+      <td>${r.bank_line_id || "—"}</td><td>${r.policy_number || "—"}</td>
+      <td class="num">${money(r.amount)}</td><td>${r.first_seen}</td><td class="num">${r.age_days}</td>
+      <td>${r.assignee || "<span class='note'>unassigned</span>"}</td>
+      <td>${r.notes.length ? `<details><summary class="note">${r.notes.length} note(s)</summary>` + r.notes.map(n => `<p class="note" style="white-space:pre-wrap">${n.at.slice(0, 10)} · ${n.by}\n${n.text}</p>`).join("") + "</details>" : "—"}</td>
+      <td style="white-space:nowrap">
+        <select id="asg-${r.exception_id}" style="font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px">${view.roster.map(n => `<option ${n === r.assignee ? "selected" : ""}>${n}</option>`).join("")}</select>
+        <button onclick="assignExc('${r.exception_id}')" style="font:inherit; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer">Assign</button>
+        <button onclick="noteExc('${r.exception_id}')" style="font:inherit; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer">Add note</button>
+      </td></tr>`).join("") + "</tbody></table>"
+    : "<p class='note'>Nothing in the queue under these filters.</p>";
+}
+async function assignExc(exceptionId) {
+  const name = $("actor").value.trim();
+  if (!name) return ($("wb-status").textContent = "Enter your name first — assignment is a named act.");
+  const assignee = $("asg-" + exceptionId).value;
+  try {
+    await api(`/api/exceptions/${encodeURIComponent(exceptionId)}/assign`, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({assignee, actor: name})});
+    $("wb-status").textContent = `${exceptionId} assigned to ${assignee}.`;
+    loadExceptions();
+  } catch (e) { $("wb-status").textContent = "Assignment refused: " + e.message; }
+}
+async function noteExc(exceptionId) {
+  const name = $("actor").value.trim();
+  if (!name) return ($("wb-status").textContent = "Enter your name first — a note is attributed.");
+  const text = prompt("Handling note (dated, attributed, append-only):", "");
+  if (!text) return;
+  try {
+    await api(`/api/exceptions/${encodeURIComponent(exceptionId)}/notes`, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({actor: name, text})});
+    $("wb-status").textContent = `Note added to ${exceptionId}.`;
+    loadExceptions();
+  } catch (e) { $("wb-status").textContent = "Note refused: " + e.message; }
 }
 async function loadSuspense() {
   const buckets = await api(`/api/suspense?as_of=${$("day").value}`);
@@ -353,6 +416,7 @@ async function loadAudit() {
      {key: "subject", label: "Subject"}, {key: "detail", label: "Detail"}], events.slice().reverse());
 }
 const loaders = {report: loadReport, import: () => Promise.resolve(), close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+$("wb-filter").addEventListener("click", () => loadExceptions().catch(e => setStatus(e.message)));
 $("return-go").addEventListener("click", recordReturn);
 $("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
 $("import-go").addEventListener("click", runImport);
