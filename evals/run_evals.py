@@ -116,6 +116,42 @@ def golden_rows() -> list[dict]:
         },
     })
     rows.append({
+        "case": "RETURN-NSF-RESEND", "kind": "returns",
+        "expect": {
+            "reopened_balance": "1000.00", "installment_status": "open",
+            "partial_refused": True, "report_returns_count": 1,
+            "report_returns_total": "1000.00", "pack_flagged": True,
+            "posting_file_unchanged": True, "resent_tier": "T1_EXACT",
+            "resent_duplicate": False, "resent_link": "BL-R1",
+            "final_balance": "0.00",
+        },
+    })
+    rows.append({
+        "case": "RETURN-SUSPENSE-CLOSE", "kind": "returns_close",
+        "expect": {
+            "received_into_suspense": "200.00", "returned_from_suspense": "200.00",
+            "closing_suspense": "0.00", "footed": True,
+            "returns_count": 1, "returns_total": "1200.00",
+            "suspense_item_status": "resolved",
+        },
+    })
+    rows.append({
+        "case": "WORKBENCH-FLOW", "kind": "workbench",
+        "expect": {
+            "total_open": 2, "counts_foot": True, "assignee": "Mei-Ling Chen",
+            "notes_count": 2, "notes_in_order": True, "off_roster_refused": True,
+            "unassigned_codes": ["UNIDENTIFIED"],
+        },
+    })
+    rows.append({
+        "case": "PROPOSAL-QUALITY", "kind": "proposals",
+        "expect": {
+            "remittance_with_edits": 2, "remittance_value_edited": "200.00",
+            "lump_sum_as_proposed": 2, "lump_sum_rejected": 2,
+            "totals_foot": True,
+        },
+    })
+    rows.append({
         "case": "IMPORT-EXAMPLE", "kind": "import",
         "expect": {
             "imported": 4, "skipped_duplicates": 0, "debit_rows_skipped": 1,
@@ -237,6 +273,223 @@ def rematch_scenarios() -> dict[str, dict]:
         "pack_id": summary2["pack_id"],
     }
     return {"REMATCH-LATE-ADVICE": late_advice, "REMATCH-STAYS-OPEN": stays_open}
+
+
+def returns_scenarios() -> dict[str, dict]:
+    """The planted return cases, in small worlds of their own: an
+    NSF return that re-opens a settled policy (and the re-send that
+    must not die as a duplicate), and an overpaid line whose return
+    releases its suspense and still lets the month foot."""
+    from decimal import Decimal as D
+
+    from cash_recon import gate
+    from cash_recon.close_pack import close_pack_export
+    from cash_recon.models import Installment, PolicyStatus, Receivable
+    from cash_recon.report import day_report
+    from cash_recon.returns import ReturnError, record_return
+
+    policy = PolicyConfig()
+
+    def direct_policy(number, premium, insured):
+        return Receivable(
+            policy_number=number, insured_name=insured, broker_id=None,
+            status=PolicyStatus.ACTIVE,
+            installments=[Installment(installment_id=f"{number}-I1", policy_number=number,
+                                      sequence=1, due_date=date(2026, 9, 1), amount_due=premium)])
+
+    def run_approve(store, day):
+        result = run_day(store, InMemoryObjectStore(), OfflineReader(), policy, day, actor=ASSEMBLER)
+        if result["pack_id"]:
+            approve_pack(store, result["pack_id"], CONTROLLER, policy)
+        return result
+
+    store = InMemoryStore()
+    store.upsert_receivable(direct_policy("NSP-3001", D("1000.00"), "Alpha Return Co"))
+    store.add_bank_line(BankLine(bank_line_id="BL-R1", value_date=date(2026, 9, 3),
+                                 amount=D("1000.00"), payer_name="Alpha Return Co",
+                                 reference="NSP-3001", narrative=""))
+    run_approve(store, date(2026, 9, 3))
+    pack = store.pack("PACK-2026-09-03")
+    posting_before = gate.posting_file(pack)
+    partial_refused = False
+    try:
+        record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5), amount=D("400.00"))
+    except ReturnError:
+        partial_refused = True
+    record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5))
+    rec = store.receivable("NSP-3001")
+    report = day_report(store, date(2026, 9, 5), policy)
+    nsf = {
+        "reopened_balance": str(rec.open_balance),
+        "installment_status": rec.installments[0].status.value,
+        "partial_refused": partial_refused,
+        "report_returns_count": report["returns_recorded"]["count"],
+        "report_returns_total": report["returns_recorded"]["total"],
+        "pack_flagged": store.pack("PACK-2026-09-03").flags == ["RETURN_AFFECTED"],
+        "posting_file_unchanged": gate.posting_file(store.pack("PACK-2026-09-03")) == posting_before,
+    }
+    store.add_bank_line(BankLine(bank_line_id="BL-R2", value_date=date(2026, 9, 6),
+                                 amount=D("1000.00"), payer_name="Alpha Return Co",
+                                 reference="NSP-3001", narrative=""))
+    resent = run_approve(store, date(2026, 9, 6))
+    outcome = next(o for o in resent["outcomes"] if o["bank_line_id"] == "BL-R2")
+    nsf.update({
+        "resent_tier": outcome["tier"],
+        "resent_duplicate": any(e["code"] == "DUPLICATE_PAYMENT" for e in outcome["exceptions"]),
+        "resent_link": next(l for l in store.bank_lines() if l.bank_line_id == "BL-R2").resend_of,
+        "final_balance": str(store.receivable("NSP-3001").open_balance),
+    })
+
+    store2 = InMemoryStore()
+    store2.upsert_receivable(direct_policy("NSP-3002", D("1000.00"), "Beta Return Co"))
+    store2.add_bank_line(BankLine(bank_line_id="BL-R3", value_date=date(2026, 9, 4),
+                                  amount=D("1200.00"), payer_name="Beta Return Co",
+                                  reference="NSP-3002", narrative=""))
+    result2 = run_day(store2, InMemoryObjectStore(), OfflineReader(), policy,
+                      date(2026, 9, 4), actor=ASSEMBLER)
+    approve_pack(store2, result2["pack_id"], CONTROLLER, policy)
+    record_return(store2, "BL-R3", "RECALL", CONTROLLER, date(2026, 9, 8))
+    roll = close_pack_export(store2, 2026, 9)["pack"]["control_roll"]
+    suspense_close = {
+        "received_into_suspense": roll["received_into_suspense"],
+        "returned_from_suspense": roll["returned_from_suspense"],
+        "closing_suspense": roll["closing_suspense"],
+        "footed": roll["footed"],
+        "returns_count": roll["returns_in_month"]["count"],
+        "returns_total": roll["returns_in_month"]["total"],
+        "suspense_item_status": store2.suspense_items()[0].status,
+    }
+    return {"RETURN-NSF-RESEND": nsf, "RETURN-SUSPENSE-CLOSE": suspense_close}
+
+
+def workbench_scenario() -> dict:
+    """The workbench flow over two planted exceptions: assignment to
+    a rostered member, two handling notes in order, an off-roster
+    refusal, and counts that foot to the queue."""
+    from decimal import Decimal as D
+
+    from cash_recon.models import Installment, PolicyStatus, Receivable
+    from cash_recon.workbench import (
+        WorkbenchError,
+        add_handling_note,
+        assign_exception,
+        workbench_view,
+    )
+
+    policy = PolicyConfig()
+    store = InMemoryStore()
+    store.upsert_receivable(Receivable(
+        policy_number="NSP-4001", insured_name="Gamma Workbench Co", broker_id=None,
+        status=PolicyStatus.ACTIVE,
+        installments=[Installment(installment_id="NSP-4001-I1", policy_number="NSP-4001",
+                                   sequence=1, due_date=date(2026, 9, 1), amount_due=D("1000.00"))]))
+    store.add_bank_line(BankLine(bank_line_id="BL-W1", value_date=date(2026, 9, 2),
+                                 amount=D("500.00"), payer_name="Stranger", reference=None,
+                                 narrative=""))
+    store.add_bank_line(BankLine(bank_line_id="BL-W2", value_date=date(2026, 9, 3),
+                                 amount=D("400.00"), payer_name="Gamma Workbench Co",
+                                 reference="NSP-4001", narrative=""))
+    objects = InMemoryObjectStore()
+    run_day(store, objects, OfflineReader(), policy, date(2026, 9, 2), actor=ASSEMBLER)
+    run_day(store, objects, OfflineReader(), policy, date(2026, 9, 3), actor=ASSEMBLER)
+
+    unidentified = next(e for e in store.exceptions(status="open") if e.code.value == "UNIDENTIFIED")
+    partial = next(e for e in store.exceptions(status="open") if e.code.value == "PARTIAL")
+    refused = False
+    try:
+        assign_exception(store, unidentified.exception_id, "Some Outsider", actor=ASSEMBLER)
+    except WorkbenchError:
+        refused = True
+    assign_exception(store, partial.exception_id, "Priya Nair", actor=ASSEMBLER)
+    unassigned = workbench_view(store, date(2026, 9, 10), unassigned=True)
+    assign_exception(store, unidentified.exception_id, "Mei-Ling Chen", actor=ASSEMBLER)
+    add_handling_note(store, unidentified.exception_id, "Mei-Ling Chen", "Asked the bank for the payer's full name.")
+    add_handling_note(store, unidentified.exception_id, "Tom Alvarez", "Payer identified as a one-off insured; awaiting their reference.")
+
+    view = workbench_view(store, date(2026, 9, 10))
+    mine = next(r for r in view["rows"] if r["exception_id"] == unidentified.exception_id)
+    return {
+        "total_open": view["total_open"],
+        "counts_foot": (
+            sum(v["count"] for v in view["counts_by_code"].values()) == view["total_open"]
+            and sum(D(v["amount"]) for v in view["counts_by_code"].values()) == D(view["total_amount"])
+        ),
+        "assignee": mine["assignee"],
+        "notes_count": len(mine["notes"]),
+        "notes_in_order": [n["by"] for n in mine["notes"]] == ["Mei-Ling Chen", "Tom Alvarez"],
+        "off_roster_refused": refused,
+        "unassigned_codes": [r["code"] for r in unassigned["rows"]],
+    }
+
+
+def proposal_scenario() -> dict:
+    """One of each proposal outcome: a remittance read approved
+    after a balanced edit, a lump sum accepted as proposed, and a
+    lump sum whose pack was rejected — graded from the gate records."""
+    from decimal import Decimal as D
+
+    from cash_recon import gate
+    from cash_recon.models import Broker, Remittance
+    from cash_recon.report import proposal_quality
+
+    policy = PolicyConfig()
+    broker = Broker(broker_id="BRK-TEST", name="Testline Brokers", commission_rate=D("0.10"))
+
+    def lump_world():
+        s = InMemoryStore()
+        s.upsert_broker(broker)
+        s.upsert_receivable(_mini_policy("NSP-5001", D("1000.00")))
+        s.upsert_receivable(_mini_policy("NSP-5002", D("2000.00")))
+        s.add_bank_line(BankLine(bank_line_id="BL-Q9", value_date=date(2026, 9, 5),
+                                 amount=D("2700.00"), payer_name="Testline Brokers",
+                                 reference=None, narrative="wire"))
+        r = run_day(s, InMemoryObjectStore(), OfflineReader(), policy,
+                    date(2026, 9, 5), actor=ASSEMBLER)
+        return s, r["pack_id"]
+
+    store = InMemoryStore()
+    store.upsert_broker(broker)
+    store.upsert_receivable(_mini_policy("NSP-2001", D("2000.00")))
+    store.upsert_receivable(_mini_policy("NSP-2002", D("3000.00")))
+    store.add_remittance(Remittance(
+        remittance_id="REM-Q1", broker_id="BRK-TEST", received_date=date(2026, 9, 5),
+        stated_total=None,
+        text=_mini_advice("2026-09-05", [("NSP-2001", "Alpha Test Co", D("1800.00")),
+                                         ("NSP-2002", "Beta Test Co", D("2700.00"))], D("4500.00"))))
+    store.add_bank_line(BankLine(bank_line_id="BL-Q1", value_date=date(2026, 9, 5),
+                                 amount=D("4500.00"), payer_name="Testline Brokers",
+                                 reference=None, narrative="wire — see remittance advice"))
+    result = run_day(store, InMemoryObjectStore(), OfflineReader(), policy,
+                     date(2026, 9, 5), actor=ASSEMBLER)
+    pack = store.pack(result["pack_id"])
+    idx = {e.allocation.policy_number: i for i, e in enumerate(pack.entries)}
+    gate.edit_pack_entries(store, result["pack_id"], CONTROLLER, [
+        {"entry_index": idx["NSP-2001"], "new_amount": D("1700.00")},
+        {"entry_index": idx["NSP-2002"], "new_amount": D("2800.00")},
+    ])
+    gate.approve_pack(store, result["pack_id"], CONTROLLER, policy)
+    quality = proposal_quality(store)
+    rem = quality["by_kind"]["remittance_read"]
+    decided = sum(
+        1 for p in store.packs() if p.status.value in ("approved", "rejected")
+        for e in p.entries if e.proposal_kind
+    )
+
+    store2, pack2 = lump_world()
+    gate.approve_pack(store2, pack2, CONTROLLER, policy)
+    lump_clean = proposal_quality(store2)["by_kind"]["lump_sum"]
+
+    store3, pack3 = lump_world()
+    gate.reject_pack(store3, pack3, CONTROLLER, "The subset looks wrong; ask the broker.")
+    lump_rejected = proposal_quality(store3)["by_kind"]["lump_sum"]
+
+    return {
+        "remittance_with_edits": rem["accepted_with_edits"],
+        "remittance_value_edited": rem["value_edited"],
+        "lump_sum_as_proposed": lump_clean["accepted_as_proposed"],
+        "lump_sum_rejected": lump_rejected["rejected"],
+        "totals_foot": quality["totals"]["proposals"] == decided == len(quality["proposals"]),
+    }
 
 
 def import_scenario() -> dict:
@@ -371,6 +624,39 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 if broker_id == "foots_to_daily_reports":
                     continue
                 observed[broker_id] = {k: card[broker_id][k] for k in fields}
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] in ("returns", "returns_close"):
+            observed = returns_scenarios()[case]
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "workbench":
+            observed = workbench_scenario()
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "proposals":
+            observed = proposal_scenario()
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()
