@@ -11,6 +11,7 @@ that went in comes back a Decimal.
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import date, datetime
 from decimal import Decimal
@@ -54,6 +55,7 @@ class Store(Protocol):
     def add_bank_line(self, line: BankLine) -> None: ...
     def bank_lines(self, on: date | None = None) -> list[BankLine]: ...
     def add_remittance(self, rem: Remittance) -> None: ...
+    def save_remittance(self, rem: Remittance) -> None: ...
     def remittances(self, on: date | None = None) -> list[Remittance]: ...
     def remittance_by_hash(self, text_hash: str) -> Remittance | None: ...
     def set_embedding(self, remittance_id: str, vector: list[float]) -> None: ...
@@ -89,33 +91,36 @@ class InMemoryStore:
 
     # -- reference data -------------------------------------------------
     def upsert_broker(self, broker):
-        self._brokers[broker.broker_id] = broker
+        self._brokers[broker.broker_id] = copy.deepcopy(broker)
 
     def brokers(self):
-        return list(self._brokers.values())
+        return copy.deepcopy(list(self._brokers.values()))
 
     def upsert_receivable(self, rec):
-        self._receivables[rec.policy_number] = rec
+        self._receivables[rec.policy_number] = copy.deepcopy(rec)
 
     def receivables(self):
-        return list(self._receivables.values())
+        return copy.deepcopy(list(self._receivables.values()))
 
     def receivable(self, policy_number):
-        return self._receivables.get(policy_number)
+        return copy.deepcopy(self._receivables.get(policy_number))
 
     # -- inputs -----------------------------------------------------------
     def add_bank_line(self, line):
-        self._bank_lines[line.bank_line_id] = line
+        self._bank_lines[line.bank_line_id] = copy.deepcopy(line)
 
     def bank_lines(self, on=None):
-        rows = list(self._bank_lines.values())
+        rows = copy.deepcopy(list(self._bank_lines.values()))
         return [r for r in rows if on is None or r.value_date == on]
 
     def add_remittance(self, rem):
-        self._remittances[rem.remittance_id] = rem
+        self._remittances[rem.remittance_id] = copy.deepcopy(rem)
+
+    def save_remittance(self, rem):
+        self._remittances[rem.remittance_id] = copy.deepcopy(rem)
 
     def remittances(self, on=None):
-        rows = list(self._remittances.values())
+        rows = copy.deepcopy(list(self._remittances.values()))
         return [r for r in rows if on is None or r.received_date == on]
 
     def remittance_by_hash(self, text_hash):
@@ -123,7 +128,7 @@ class InMemoryStore:
 
         for rem in self._remittances.values():
             if hashlib.sha256(rem.text.encode()).hexdigest() == text_hash:
-                return rem
+                return copy.deepcopy(rem)
         return None
 
     def set_embedding(self, remittance_id, vector):
@@ -134,46 +139,46 @@ class InMemoryStore:
 
     # -- outcomes -----------------------------------------------------------
     def save_allocations(self, allocs, pack_id):
-        self._allocations.extend(allocs)
+        self._allocations.extend(copy.deepcopy(allocs))
 
     def allocations(self, bank_line_id=None):
         if bank_line_id is None:
-            return list(self._allocations)
-        return [a for a in self._allocations if a.bank_line_id == bank_line_id]
+            return copy.deepcopy(list(self._allocations))
+        return copy.deepcopy([a for a in self._allocations if a.bank_line_id == bank_line_id])
 
     def add_exception(self, exc):
-        self._exceptions[exc.exception_id] = exc
+        self._exceptions[exc.exception_id] = copy.deepcopy(exc)
 
     def exceptions(self, status=None):
-        rows = list(self._exceptions.values())
+        rows = copy.deepcopy(list(self._exceptions.values()))
         return [r for r in rows if status is None or r.status == status]
 
     def update_exception(self, exc):
-        self._exceptions[exc.exception_id] = exc
+        self._exceptions[exc.exception_id] = copy.deepcopy(exc)
 
     def add_suspense(self, item):
-        self._suspense[item.suspense_id] = item
+        self._suspense[item.suspense_id] = copy.deepcopy(item)
 
     def suspense_items(self):
-        return list(self._suspense.values())
+        return copy.deepcopy(list(self._suspense.values()))
 
     def save_pack(self, pack):
-        self._packs[pack.pack_id] = pack
+        self._packs[pack.pack_id] = copy.deepcopy(pack)
 
     def pack(self, pack_id):
-        return self._packs.get(pack_id)
+        return copy.deepcopy(self._packs.get(pack_id))
 
     def packs(self, on=None):
-        rows = list(self._packs.values())
+        rows = copy.deepcopy(list(self._packs.values()))
         return [r for r in rows if on is None or r.value_date == on]
 
     def audit(self, event):
-        self._audit.append(event)
+        self._audit.append(copy.deepcopy(event))
 
     def audit_events(self, subject=None):
         if subject is None:
-            return list(self._audit)
-        return [e for e in self._audit if e.subject == subject]
+            return copy.deepcopy(list(self._audit))
+        return copy.deepcopy([e for e in self._audit if e.subject == subject])
 
 
 class PostgresStore:
@@ -263,6 +268,21 @@ class PostgresStore:
         self._put(
             "INSERT INTO remittances (remittance_id, received_date, text_hash, payload) "
             "VALUES (%s, %s, %s, %s) ON CONFLICT (remittance_id) DO NOTHING",
+            (
+                rem.remittance_id,
+                rem.received_date,
+                hashlib.sha256(rem.text.encode()).hexdigest(),
+                dump(rem),
+            ),
+        )
+
+    def save_remittance(self, rem):
+        import hashlib
+
+        self._put(
+            "INSERT INTO remittances (remittance_id, received_date, text_hash, payload) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (remittance_id) DO UPDATE SET "
+            "received_date = EXCLUDED.received_date, payload = EXCLUDED.payload",
             (
                 rem.remittance_id,
                 rem.received_date,
