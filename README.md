@@ -67,7 +67,7 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (31 cases, gold by construction)
+make evals       # the golden-case gate (34 cases, gold by construction)
 make serve       # API + console on http://localhost:8000
 ```
 
@@ -172,6 +172,20 @@ call the day reconciled. Suspense is aged in buckets (0–7, 8–30,
 re-match pass is shown as its own line for the day the recovery ran,
 by bank line — never folded silently into the day's allocations.
 
+## The broker scorecard
+
+A read model over everything on the books, one row per broker
+(console tab, `/api/brokers/scorecard`, `cash-recon scorecard`):
+remittances received, the money in and where it stands, the
+**clean-netting rate** — of the lines that settled at a netting
+tier, the share that raised no exception — netting mismatches and
+their total delta, the average days their cash sat unapplied, and
+the exceptions still open against them, by code. The money columns
+use the daily reports' own attribution, so they foot to the sum of
+the days' by-broker splits. The query notes drafted for a broker's
+mismatches hang off their row — view only. It scores brokers'
+paperwork, never people, and it sends nothing.
+
 ## Guardrails, as code
 
 - Remittance and bank text is **untrusted**. Instruction-like text
@@ -190,10 +204,13 @@ by bank line — never folded silently into the day's allocations.
 ## Evals
 
 `make evals` runs the synthetic month through the real pipeline and
-scores 31 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 34 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
-near-duplicate, and two controls (every day foots; the opening
-suspense ages into the right buckets). The runner prints a
+near-duplicate, two re-match cases (a corrected advice rescues its
+wire; an advice that still does not foot leaves the cash open under
+the correct code), and controls (every day foots; the opening
+suspense ages into the right buckets; the broker scorecard's money
+foots to the daily reports). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
@@ -212,7 +229,7 @@ src/cash_recon/
   llm.py         the model port: reader, proposer, note drafter
   documents.py   the document screen + near-duplicate detection
   gate.py        packs, approvals, write-offs, the posting file
-  report.py      the daily reconciliation report + suspense aging
+  report.py      the daily reconciliation report, suspense aging, the broker scorecard
   pipeline.py    the day run as a LangGraph graph
   rematch.py     the suspense re-match pass: late information, same tiers, same gate
   store.py       Postgres (production) / SQLite (local) / in-memory (tests)
@@ -226,8 +243,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 52 tests,
-31/31 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 65 tests,
+34/34 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, and the offline fallback is what the demo and the

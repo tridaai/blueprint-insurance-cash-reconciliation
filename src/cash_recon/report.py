@@ -14,7 +14,8 @@ from datetime import date
 from decimal import Decimal
 
 from .config import Policy as PolicyConfig
-from .money import ZERO
+from .models import ExceptionCode, Tier
+from .money import ZERO, cents
 from .store import Store
 
 BUCKETS = [(0, 7, "0–7 days"), (8, 30, "8–30 days"), (31, 60, "31–60 days"), (61, None, "60+ days")]
@@ -163,6 +164,106 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
             for i in sorted(stale, key=lambda i: i.received_date)
         ],
     }
+
+
+def broker_scorecard(store: Store, as_of: date) -> list[dict]:
+    """Per-broker read model over everything on the books.
+
+    For each broker: the money (bank / allocated / open suspense,
+    attributed exactly as the daily reports attribute it — sum the
+    days' by-broker splits and you get these numbers back), the
+    remittances received, how cleanly their netting settles, what
+    their netting mistakes cost, how long their cash sits unapplied,
+    and the exceptions still open against them. Plus the broker
+    query notes the pipeline drafted for their mismatches — view
+    only; the system drafts notes, it never sends them, and it
+    scores brokers' paperwork, never people.
+
+    Clean-netting rate: of the broker's lines that settled at T2 or
+    T4 (the netting tiers), the share that raised no exception at
+    all. Average days unapplied: over every suspense item the
+    broker's lines produced, resolved items count to their
+    resolution date, open ones to `as_of`.
+    """
+    brokers = store.brokers()
+    names = {b.broker_id: b.name for b in brokers}
+    lines = store.bank_lines()
+    alloc_by_line: dict[str, list] = {}
+    for a in store.allocations():
+        alloc_by_line.setdefault(a.bank_line_id, []).append(a)
+    open_susp_by_line: dict[str, Decimal] = {}
+    for i in store.suspense_items():
+        if i.status == "open":
+            open_susp_by_line[i.bank_line_id] = open_susp_by_line.get(i.bank_line_id, ZERO) + i.amount
+    exc_by_line: dict[str, list] = {}
+    for e in store.exceptions():
+        if e.bank_line_id:
+            exc_by_line.setdefault(e.bank_line_id, []).append(e)
+    notes = [e for e in store.audit_events() if e.action == "broker_note_drafted"]
+    remittances = store.remittances()
+    all_suspense = store.suspense_items()
+
+    rows: list[dict] = []
+    for broker in sorted(brokers, key=lambda b: b.name):
+        bid = broker.broker_id
+        mine = [l for l in lines if _broker_key(store, l, names) == bid]
+        mine_ids = {l.bank_line_id for l in mine}
+        bank = sum((l.amount for l in mine), ZERO)
+        allocated = sum(
+            (a.amount for lid in mine_ids for a in alloc_by_line.get(lid, [])), ZERO
+        )
+        suspense = sum((open_susp_by_line.get(lid, ZERO) for lid in mine_ids), ZERO)
+        settled = [
+            l for l in mine
+            if any(a.tier in (Tier.T2_NETTING, Tier.T4_REMITTANCE)
+                   for a in alloc_by_line.get(l.bank_line_id, []))
+        ]
+        clean = [l for l in settled if not exc_by_line.get(l.bank_line_id)]
+        rate = (
+            str((Decimal(len(clean)) / Decimal(len(settled))).quantize(Decimal("0.0001")))
+            if settled else None
+        )
+        mismatches = [
+            e for e in store.exceptions()
+            if e.code == ExceptionCode.NETTING_MISMATCH and e.broker_id == bid
+        ]
+        open_by_code: dict[str, dict] = {}
+        for e in store.exceptions(status="open"):
+            if e.broker_id != bid:
+                continue
+            slot = open_by_code.setdefault(e.code.value, {"count": 0, "amount": ZERO})
+            slot["count"] += 1
+            slot["amount"] += e.amount
+        items = [i for i in all_suspense if i.bank_line_id in mine_ids]
+        days = [((i.resolved_on or as_of) - i.received_date).days for i in items]
+        avg_days = (
+            str(cents(Decimal(sum(days)) / Decimal(len(days)))) if days else None
+        )
+        rows.append({
+            "broker_id": bid,
+            "broker": names[bid],
+            "remittances_received": len([r for r in remittances if r.broker_id == bid]),
+            "bank_total": str(bank),
+            "allocated_total": str(allocated),
+            "suspense_total": str(suspense),
+            "settled_netting_lines": len(settled),
+            "clean_netting_lines": len(clean),
+            "clean_netting_rate": rate,
+            "netting_mismatches": len(mismatches),
+            "netting_mismatch_delta": str(sum((e.amount for e in mismatches), ZERO)),
+            "avg_days_unapplied": avg_days,
+            "suspense_items_counted": len(items),
+            "open_exceptions_by_code": {
+                k: {"count": v["count"], "amount": str(v["amount"])}
+                for k, v in sorted(open_by_code.items())
+            },
+            "query_notes": [
+                {"bank_line_id": e.subject, "at": e.at.isoformat(), "note": e.detail}
+                for e in notes
+                if e.subject in mine_ids
+            ],
+        })
+    return rows
 
 
 def _broker_key(store: Store, line, broker_names: dict[str, str]) -> str:

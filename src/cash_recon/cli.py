@@ -18,7 +18,7 @@ from .llm import make_reader
 from .objects import make_object_store
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
-from .report import day_report
+from .report import broker_scorecard, day_report
 from .store import make_store
 
 
@@ -34,6 +34,8 @@ def main() -> None:
     rem = sub.add_parser("rematch", help="re-match open suspense against the books as they stand")
     rem.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     rem.add_argument("--actor", default="cash-team")
+    sco = sub.add_parser("scorecard", help="print the broker netting scorecard")
+    sco.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     args = parser.parse_args()
 
     store, objects = make_store(), make_object_store()
@@ -52,6 +54,9 @@ def main() -> None:
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         summary = rematch_suspense(store, make_reader(), policy, args.actor, as_of)
         print(json.dumps(summary, indent=2))
+    elif args.command == "scorecard":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        print(json.dumps(broker_scorecard(store, as_of), indent=2))
 
 
 if __name__ == "__main__":

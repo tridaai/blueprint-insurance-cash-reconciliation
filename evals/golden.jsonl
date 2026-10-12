@@ -31,3 +31,4 @@
 {"case": "CONTROL-AGING", "kind": "control", "expect": "seed suspense ages into 31\u201360 and 60+ buckets"}
 {"case": "REMATCH-LATE-ADVICE", "kind": "rematch", "expect": {"recovered_bank_line": "BL-T1", "tier": "T4_REMITTANCE", "pack_id": "PACK-REMATCH-2026-09-08", "item_status": "resolved", "arithmetic_exception": "resolved", "partial_exception": "open", "recoveries_total": "4400.00"}}
 {"case": "REMATCH-STAYS-OPEN", "kind": "rematch", "expect": {"still_open_reason": "REMITTANCE_ARITHMETIC", "item_status": "open", "item_amount": "1000.00", "pack_id": null}}
+{"case": "CONTROL-SCORECARD", "kind": "scorecard", "expect": {"foots_to_daily_reports": true, "BRK-COPPER": {"netting_mismatches": 1, "netting_mismatch_delta": "189.60", "clean_netting_rate": null}, "BRK-ALDER": {"clean_netting_rate": "1.0000", "remittances_received": 2}}}

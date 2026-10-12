@@ -156,6 +156,11 @@ def create_app(service: Service | None = None) -> FastAPI:
         s = get_service()
         return report_mod.suspense_aging(s.store, as_of or date.today())
 
+    @app.get("/api/brokers/scorecard")
+    def scorecard(as_of: date | None = None):
+        s = get_service()
+        return report_mod.broker_scorecard(s.store, as_of or date.today())
+
     @app.post("/api/suspense/rematch")
     def rematch(body: RematchRequest):
         s = get_service()

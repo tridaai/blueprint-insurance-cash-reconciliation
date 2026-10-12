@@ -38,7 +38,7 @@ from cash_recon.models import (  # noqa: E402
 from cash_recon.objects import InMemoryObjectStore  # noqa: E402
 from cash_recon.pipeline import ingest_dataset, run_day  # noqa: E402
 from cash_recon.rematch import rematch_suspense  # noqa: E402
-from cash_recon.report import day_report, suspense_aging  # noqa: E402
+from cash_recon.report import broker_scorecard, day_report, suspense_aging  # noqa: E402
 from cash_recon.store import InMemoryStore  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "golden.jsonl"
@@ -90,6 +90,15 @@ def golden_rows() -> list[dict]:
         "expect": {
             "still_open_reason": "REMITTANCE_ARITHMETIC", "item_status": "open",
             "item_amount": "1000.00", "pack_id": None,
+        },
+    })
+    rows.append({
+        "case": "CONTROL-SCORECARD", "kind": "scorecard",
+        "expect": {
+            "foots_to_daily_reports": True,
+            "BRK-COPPER": {"netting_mismatches": 1, "netting_mismatch_delta": "189.60",
+                           "clean_netting_rate": None},
+            "BRK-ALDER": {"clean_netting_rate": "1.0000", "remittances_received": 2},
         },
     })
     return rows
@@ -272,6 +281,37 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 passed += 1
         elif row["kind"] == "rematch":
             observed = rematch_scenarios()[case]
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "scorecard":
+            from decimal import Decimal as D
+
+            card = {r["broker_id"]: r for r in broker_scorecard(store, date(2026, 9, 21))}
+            totals: dict[str, dict[str, D]] = {}
+            for day_iso in reports:
+                split_by_broker = day_report(store, date.fromisoformat(day_iso), PolicyConfig())["by_broker"]
+                for broker_id, split in split_by_broker.items():
+                    slot = totals.setdefault(broker_id, {"bank": D("0"), "allocated": D("0"), "suspense": D("0")})
+                    for key in slot:
+                        slot[key] += D(split[key])
+            foots = all(
+                D(r["bank_total"]) == totals[r["broker_id"]]["bank"]
+                and D(r["allocated_total"]) == totals[r["broker_id"]]["allocated"]
+                and D(r["suspense_total"]) == totals[r["broker_id"]]["suspense"]
+                for r in card.values()
+            )
+            observed = {"foots_to_daily_reports": foots}
+            for broker_id, fields in row["expect"].items():
+                if broker_id == "foots_to_daily_reports":
+                    continue
+                observed[broker_id] = {k: card[broker_id][k] for k in fields}
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()

@@ -113,6 +113,18 @@ is audited against the item with the tiers run and the outcome, so
 "we tried on the 8th and the advice still did not foot" is a
 record, not a memory.
 
+**Brokers are scored on paperwork, not people.** The scorecard
+(`report.broker_scorecard`) is a read model over the same records
+the daily reports use, with the same line-to-broker attribution —
+so its money columns foot to the sum of the daily by-broker splits
+by construction, an identity the eval gate checks as a control. It
+answers the questions a desk lead actually asks of a broker
+relationship: how much arrived, how much is still unapplied and for
+how long on average, what share of netting-tier settlements came
+through without an exception, and what the broker's rate mistakes
+cost in held cash. The drafted query notes hang off the row they
+belong to. Nothing in it ranks people or contacts anyone.
+
 ## Stores
 
 - **PostgreSQL** (production): one table per record type, payloads as

@@ -54,6 +54,7 @@
 
 <nav>
   <button data-tab="report" class="active">Day report</button>
+  <button data-tab="scorecard">Broker scorecard</button>
   <button data-tab="exceptions">Exceptions</button>
   <button data-tab="suspense">Suspense aging</button>
   <button data-tab="packs">Posting packs</button>
@@ -67,6 +68,10 @@
     <h3>By broker</h3><div id="bybroker"></div>
     <h3>Re-match recoveries this day</h3><div id="rematchreport"></div>
     <h3>Exceptions raised this day</h3><div id="dayexceptions"></div>
+  </section>
+  <section id="tab-scorecard" class="hidden">
+    <p class="note">Per broker, over everything on the books: how their cash arrives, how cleanly their netting settles, and what is still open against them. The money columns are the daily reports' by-broker split, summed. Query notes are drafts the system wrote for review — nothing here sends anything.</p>
+    <div id="scorecard"></div>
   </section>
   <section id="tab-exceptions" class="hidden"><div id="exceptions"></div></section>
   <section id="tab-suspense" class="hidden">
@@ -129,6 +134,28 @@ function exceptionTable(rows) {
      {key: "bank_line_id", label: "Bank line"}, {key: "policy_number", label: "Policy"},
      {key: "amount", label: "Amount at issue", num: 1, render: r => money(r.amount)},
      {key: "detail", label: "Detail"}, {key: "status", label: "Status"}], rows);
+}
+async function loadScorecard() {
+  const rows = await api(`/api/brokers/scorecard?as_of=${$("day").value}`);
+  $("scorecard").innerHTML = rows.map(r => {
+    const rate = r.clean_netting_rate === null ? "—" :
+      `${(Number(r.clean_netting_rate) * 100).toFixed(1)}% (${r.clean_netting_lines}/${r.settled_netting_lines} lines)`;
+    const open = Object.entries(r.open_exceptions_by_code)
+      .map(([code, v]) => `<span class="pill bad">${code} ×${v.count} — ${money(v.amount)}</span>`).join(" ") || "—";
+    const notes = r.query_notes.length
+      ? `<details><summary class="note">${r.query_notes.length} drafted query note(s) — view only, never sent</summary>` +
+        r.query_notes.map(n => `<p class="note" style="white-space:pre-wrap; border-left:3px solid var(--line); padding-left:10px">${n.bank_line_id} · ${n.at}\n${n.note}</p>`).join("") + "</details>"
+      : "";
+    return `<h3>${r.broker}</h3>` + table(
+      [{key: "remittances_received", label: "Remittances", num: 1},
+       {key: "bank_total", label: "Bank", num: 1, render: x => money(x.bank_total)},
+       {key: "allocated_total", label: "Allocated", num: 1, render: x => money(x.allocated_total)},
+       {key: "suspense_total", label: "In suspense", num: 1, render: x => money(x.suspense_total)},
+       {label: "Clean netting", render: () => rate},
+       {label: "Netting mismatches", render: x => `${x.netting_mismatches} — ${money(x.netting_mismatch_delta)}`},
+       {label: "Avg days unapplied", render: x => x.avg_days_unapplied === null ? "—" : `${x.avg_days_unapplied} (${x.suspense_items_counted} item(s))`},
+       {label: "Open exceptions", render: () => open}], [r]) + notes;
+  }).join("") || "<p class='note'>No brokers yet. Seed the synthetic month.</p>";
 }
 async function loadExceptions() {
   $("exceptions").innerHTML = exceptionTable(await api("/api/exceptions"));
@@ -204,7 +231,7 @@ async function loadAudit() {
     [{key: "at", label: "At"}, {key: "actor", label: "Actor"}, {key: "action", label: "Action"},
      {key: "subject", label: "Subject"}, {key: "detail", label: "Detail"}], events.slice().reverse());
 }
-const loaders = {report: loadReport, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+const loaders = {report: loadReport, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
 document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
   document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");

@@ -25,7 +25,7 @@ from .gate import approve_pack
 from .llm import OfflineReader
 from .objects import InMemoryObjectStore
 from .pipeline import ingest_dataset, run_day
-from .report import day_report, suspense_aging
+from .report import broker_scorecard, day_report, suspense_aging
 from .store import SqliteStore, make_store
 
 ASSEMBLER = "cash-team"
@@ -72,6 +72,12 @@ def main() -> None:
         print(f"  {bucket['bucket']:<10} {bucket['total']:>10}  ({bucket['count']} items)")
         for item in bucket["items"]:
             print(f"      {item['bank_line_id']:<8} {item['amount']:>10}  {item['age_days']} days — {item['reason']}")
+
+    print("\nBroker scorecard at 2026-09-30:")
+    for row in broker_scorecard(store, date(2026, 9, 30)):
+        print(f"  {row['broker']:<34} bank {row['bank_total']:>10}  allocated {row['allocated_total']:>10}  "
+              f"suspense {row['suspense_total']:>9}  clean netting {row['clean_netting_rate'] or '—'}  "
+              f"mismatches {row['netting_mismatches']}")
 
     final = day_report(store, date(2026, 9, 30), policy)
     print(f"\nFinal word from the control: {final['footing_note']}")
