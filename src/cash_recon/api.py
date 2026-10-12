@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from . import gate, report as report_mod
+from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .gate import GateError
@@ -160,6 +161,27 @@ def create_app(service: Service | None = None) -> FastAPI:
     def scorecard(as_of: date | None = None):
         s = get_service()
         return report_mod.broker_scorecard(s.store, as_of or date.today())
+
+    @app.get("/api/close/{month}")
+    def close(month: str):
+        s = get_service()
+        try:
+            year, mon = parse_month(month)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return close_pack_export(s.store, year, mon)
+
+    @app.get("/api/close/{month}/text")
+    def close_text(month: str):
+        s = get_service()
+        try:
+            year, mon = parse_month(month)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return PlainTextResponse(
+            render_close_pack_text(close_pack_export(s.store, year, mon)),
+            media_type="text/plain",
+        )
 
     @app.post("/api/suspense/rematch")
     def rematch(body: RematchRequest):

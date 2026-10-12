@@ -12,6 +12,7 @@ import argparse
 import json
 from datetime import date
 
+from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .llm import make_reader
@@ -36,6 +37,9 @@ def main() -> None:
     rem.add_argument("--actor", default="cash-team")
     sco = sub.add_parser("scorecard", help="print the broker netting scorecard")
     sco.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
+    clo = sub.add_parser("close", help="print a month-end close pack (a report, not a lock)")
+    clo.add_argument("month", help="YYYY-MM")
+    clo.add_argument("--format", choices=("json", "text"), default="json")
     args = parser.parse_args()
 
     store, objects = make_store(), make_object_store()
@@ -57,6 +61,13 @@ def main() -> None:
     elif args.command == "scorecard":
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         print(json.dumps(broker_scorecard(store, as_of), indent=2))
+    elif args.command == "close":
+        year, month = parse_month(args.month)
+        export = close_pack_export(store, year, month)
+        if args.format == "text":
+            print(render_close_pack_text(export), end="")
+        else:
+            print(json.dumps(export, indent=2))
 
 
 if __name__ == "__main__":

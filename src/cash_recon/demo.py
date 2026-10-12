@@ -19,6 +19,7 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
+from .close_pack import close_pack_export
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .gate import approve_pack
@@ -81,6 +82,12 @@ def main() -> None:
 
     final = day_report(store, date(2026, 9, 30), policy)
     print(f"\nFinal word from the control: {final['footing_note']}")
+
+    export = close_pack_export(store, 2026, 9)
+    roll = export["pack"]["control_roll"]
+    print(f"\nMonth-end close pack for 2026-09: opening suspense {roll['opening_suspense']}, "
+          f"received into suspense {roll['received_into_suspense']}, closing {roll['closing_suspense']} "
+          f"— {'FOOTS' if roll['footed'] else 'NOT FOOTED'} (SHA-256 {export['sha256'][:16]}…)")
 
 
 if __name__ == "__main__":

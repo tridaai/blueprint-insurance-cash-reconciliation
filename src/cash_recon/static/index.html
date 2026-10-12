@@ -54,6 +54,7 @@
 
 <nav>
   <button data-tab="report" class="active">Day report</button>
+  <button data-tab="close">Month close</button>
   <button data-tab="scorecard">Broker scorecard</button>
   <button data-tab="exceptions">Exceptions</button>
   <button data-tab="suspense">Suspense aging</button>
@@ -68,6 +69,15 @@
     <h3>By broker</h3><div id="bybroker"></div>
     <h3>Re-match recoveries this day</h3><div id="rematchreport"></div>
     <h3>Exceptions raised this day</h3><div id="dayexceptions"></div>
+  </section>
+  <section id="tab-close" class="hidden">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <label>Month <input type="month" id="close-month" value="2026-09"></label>
+      <button id="load-close" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer">Build the close pack</button>
+      <a id="close-text-link" href="#" target="_blank">text rendering ↗</a>
+    </div>
+    <p class="note">The period control: the suspense roll for the month, every pack approved in it, the exceptions opened and closed, suspense aging at month end, and the month's broker scorecard — with a SHA-256 digest over the pack body. Assembling it changes nothing in the books; closing a month here is a report, not a lock.</p>
+    <div id="close-pack"></div>
   </section>
   <section id="tab-scorecard" class="hidden">
     <p class="note">Per broker, over everything on the books: how their cash arrives, how cleanly their netting settles, and what is still open against them. The money columns are the daily reports' by-broker split, summed. Query notes are drafts the system wrote for review — nothing here sends anything.</p>
@@ -134,6 +144,47 @@ function exceptionTable(rows) {
      {key: "bank_line_id", label: "Bank line"}, {key: "policy_number", label: "Policy"},
      {key: "amount", label: "Amount at issue", num: 1, render: r => money(r.amount)},
      {key: "detail", label: "Detail"}, {key: "status", label: "Status"}], rows);
+}
+async function loadClose() {
+  const month = $("close-month").value;
+  $("close-text-link").href = `/api/close/${month}/text`;
+  const exp = await api(`/api/close/${month}`);
+  const p = exp.pack, roll = p.control_roll;
+  const agingRows = p.suspense_aging_at_month_end.flatMap(b => b.items.map(i => ({bucket: b.bucket, ...i})));
+  $("close-pack").innerHTML =
+    `<p><span class="pill ${roll.footed ? "ok" : "bad"}">${roll.footed ? "FOOTS" : "NOT FOOTED"}</span> ${roll.footing_note}</p>
+     <p class="note">SHA-256 of the pack body: <code>${exp.sha256}</code> · generated as of ${exp.generated_as_of} · regenerated from unchanged books it is byte-identical.</p>
+     <h3>Control roll</h3>` +
+    table([{key: "k", label: "Line"}, {key: "v", label: "Amount", num: 1, render: r => money(r.v)}], [
+      {k: "Opening suspense", v: roll.opening_suspense},
+      {k: "Cash received in month (bank total)", v: roll.cash_received_in_month},
+      {k: "Received into suspense", v: roll.received_into_suspense},
+      {k: "Applied from suspense", v: roll.applied_from_suspense},
+      {k: "Applied via approved packs", v: roll.applied_allocations_approved},
+      {k: "Approved write-offs (receivable deltas)", v: roll.approved_write_offs},
+      {k: "Closing suspense", v: roll.closing_suspense},
+      {k: "Difference", v: roll.difference}]) +
+    `<h3>Posting packs approved in the month (${p.packs_approved_in_month.length})</h3>` +
+    table([{key: "pack_id", label: "Pack"}, {key: "value_date", label: "Value date"},
+           {label: "Approved by", render: r => r.approvals.join(", ")},
+           {key: "allocation_total", label: "Allocations", num: 1, render: r => money(r.allocation_total)},
+           {key: "write_off_total", label: "Write-offs", num: 1, render: r => money(r.write_off_total)}], p.packs_approved_in_month) +
+    `<h3>Exceptions</h3><p class="note">${p.exceptions_opened_in_month.length} opened in the month · ${p.exceptions_closed_by_month_end.length} closed by month end.</p>` +
+    exceptionTable(p.exceptions_opened_in_month.map(e => ({...e, code: e.code, status: e.disposition}))) +
+    `<h3>Suspense aging at month end</h3>` +
+    table([{key: "bucket", label: "Bucket"}, {key: "bank_line_id", label: "Bank line"},
+           {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+           {key: "received_date", label: "Received"}, {key: "age_days", label: "Age (days)", num: 1},
+           {key: "reason", label: "Reason"}], agingRows) +
+    `<h3>Broker scorecard for the month</h3>` +
+    table([{key: "broker", label: "Broker"}, {key: "bank_total", label: "Bank", num: 1, render: r => money(r.bank_total)},
+           {key: "allocated_total", label: "Allocated", num: 1, render: r => money(r.allocated_total)},
+           {key: "suspense_total", label: "Suspense", num: 1, render: r => money(r.suspense_total)},
+           {label: "Clean netting", render: r => r.clean_netting_rate === null ? "—" : (Number(r.clean_netting_rate) * 100).toFixed(1) + "%"},
+           {key: "netting_mismatches", label: "Mismatches", num: 1}], p.broker_scorecard) +
+    (p.discrepancies.length ? `<h3>Discrepancies</h3>` + table(
+      [{key: "suspense_id", label: "Item"}, {key: "problem", label: "Problem"},
+       {key: "amount", label: "Amount at issue", num: 1, render: r => money(r.amount)}], p.discrepancies) : "");
 }
 async function loadScorecard() {
   const rows = await api(`/api/brokers/scorecard?as_of=${$("day").value}`);
@@ -231,7 +282,8 @@ async function loadAudit() {
     [{key: "at", label: "At"}, {key: "actor", label: "Actor"}, {key: "action", label: "Action"},
      {key: "subject", label: "Subject"}, {key: "detail", label: "Detail"}], events.slice().reverse());
 }
-const loaders = {report: loadReport, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+const loaders = {report: loadReport, close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+$("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
 document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
   document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");

@@ -166,7 +166,7 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
     }
 
 
-def broker_scorecard(store: Store, as_of: date) -> list[dict]:
+def broker_scorecard(store: Store, as_of: date, month: tuple[int, int] | None = None) -> list[dict]:
     """Per-broker read model over everything on the books.
 
     For each broker: the money (bank / allocated / open suspense,
@@ -184,10 +184,19 @@ def broker_scorecard(store: Store, as_of: date) -> list[dict]:
     all. Average days unapplied: over every suspense item the
     broker's lines produced, resolved items count to their
     resolution date, open ones to `as_of`.
+
+    With `month=(year, month)` the card is scoped to that calendar
+    month — bank lines received in it, remittances received in it,
+    and the exceptions those lines raised — which is the form the
+    month-end close pack carries. Without it, the card is cumulative
+    over everything on the books, as before.
     """
     brokers = store.brokers()
     names = {b.broker_id: b.name for b in brokers}
     lines = store.bank_lines()
+    if month is not None:
+        lines = [l for l in lines if (l.value_date.year, l.value_date.month) == month]
+    month_line_ids = {l.bank_line_id for l in lines} if month is not None else None
     alloc_by_line: dict[str, list] = {}
     for a in store.allocations():
         alloc_by_line.setdefault(a.bank_line_id, []).append(a)
@@ -201,6 +210,10 @@ def broker_scorecard(store: Store, as_of: date) -> list[dict]:
             exc_by_line.setdefault(e.bank_line_id, []).append(e)
     notes = [e for e in store.audit_events() if e.action == "broker_note_drafted"]
     remittances = store.remittances()
+    if month is not None:
+        remittances = [
+            r for r in remittances if (r.received_date.year, r.received_date.month) == month
+        ]
     all_suspense = store.suspense_items()
 
     rows: list[dict] = []
@@ -226,10 +239,13 @@ def broker_scorecard(store: Store, as_of: date) -> list[dict]:
         mismatches = [
             e for e in store.exceptions()
             if e.code == ExceptionCode.NETTING_MISMATCH and e.broker_id == bid
+            and (month_line_ids is None or e.bank_line_id in month_line_ids)
         ]
         open_by_code: dict[str, dict] = {}
         for e in store.exceptions(status="open"):
             if e.broker_id != bid:
+                continue
+            if month_line_ids is not None and e.bank_line_id not in month_line_ids:
                 continue
             slot = open_by_code.setdefault(e.code.value, {"count": 0, "amount": ZERO})
             slot["count"] += 1

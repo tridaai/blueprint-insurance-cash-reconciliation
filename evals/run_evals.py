@@ -101,6 +101,20 @@ def golden_rows() -> list[dict]:
             "BRK-ALDER": {"clean_netting_rate": "1.0000", "remittances_received": 2},
         },
     })
+    rows.append({
+        "case": "CLOSE-2026-09", "kind": "close",
+        "expect": {
+            "opening_suspense": "3280.00",
+            "cash_received_in_month": "219914.65",
+            "received_into_suspense": "61086.99",
+            "applied_from_suspense": "0.00",
+            "approved_write_offs": "0.00",
+            "closing_suspense": "64366.99",
+            "footed": True,
+            "packs_approved": 15,
+            "digest_stable": True,
+        },
+    })
     return rows
 
 
@@ -312,6 +326,32 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 if broker_id == "foots_to_daily_reports":
                     continue
                 observed[broker_id] = {k: card[broker_id][k] for k in fields}
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "close":
+            from cash_recon.close_pack import close_pack_export
+
+            export = close_pack_export(store, 2026, 9)
+            again = close_pack_export(store, 2026, 9)
+            roll = export["pack"]["control_roll"]
+            observed = {
+                "opening_suspense": roll["opening_suspense"],
+                "cash_received_in_month": roll["cash_received_in_month"],
+                "received_into_suspense": roll["received_into_suspense"],
+                "applied_from_suspense": roll["applied_from_suspense"],
+                "approved_write_offs": roll["approved_write_offs"],
+                "closing_suspense": roll["closing_suspense"],
+                "footed": roll["footed"],
+                "packs_approved": len(export["pack"]["packs_approved_in_month"]),
+                "digest_stable": export["sha256"] == again["sha256"],
+            }
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()
