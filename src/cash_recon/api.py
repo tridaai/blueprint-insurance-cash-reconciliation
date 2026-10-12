@@ -25,6 +25,7 @@ from .llm import make_reader
 from .logging_setup import configure_logging, new_request_id
 from .objects import ObjectStore, make_object_store
 from .pipeline import ingest_dataset, run_day
+from .rematch import rematch_suspense
 from .store import Store, dump, make_store
 
 log = logging.getLogger("cash_recon.api")
@@ -48,6 +49,11 @@ class RejectRequest(BaseModel):
 class WriteOffRequest(BaseModel):
     exception_id: str
     actor: str
+
+
+class RematchRequest(BaseModel):
+    actor: str = "cash-team"
+    as_of: date | None = None
 
 
 def present(model) -> dict:
@@ -149,6 +155,13 @@ def create_app(service: Service | None = None) -> FastAPI:
     def suspense(as_of: date | None = None):
         s = get_service()
         return report_mod.suspense_aging(s.store, as_of or date.today())
+
+    @app.post("/api/suspense/rematch")
+    def rematch(body: RematchRequest):
+        s = get_service()
+        return rematch_suspense(
+            s.store, s.reader, s.policy, body.actor, body.as_of or date.today()
+        )
 
     @app.get("/api/packs")
     def packs():

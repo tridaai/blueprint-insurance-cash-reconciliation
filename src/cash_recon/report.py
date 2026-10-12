@@ -20,9 +20,33 @@ from .store import Store
 BUCKETS = [(0, 7, "0–7 days"), (8, 30, "8–30 days"), (31, 60, "31–60 days"), (61, None, "60+ days")]
 
 
+def rematch_recoveries(store: Store, day: date) -> dict:
+    """Cash the re-match pass recovered on this day, as its own line:
+    the allocations that entered through a PACK-REMATCH-<day> pack,
+    grouped by bank line. A recovery is a proposal at the gate, like
+    any fresh match — the pack's status says how far it got."""
+    prefix = f"PACK-REMATCH-{day.isoformat()}"
+    by_line: dict[str, Decimal] = {}
+    for pack in store.packs():
+        if pack.pack_id != prefix and not pack.pack_id.startswith(prefix + "-"):
+            continue
+        for entry in pack.entries:
+            if entry.allocation:
+                by_line[entry.allocation.bank_line_id] = (
+                    by_line.get(entry.allocation.bank_line_id, ZERO) + entry.allocation.amount
+                )
+    return {
+        "recovered_total": str(sum(by_line.values(), ZERO)),
+        "recovered_lines": len(by_line),
+        "items": [
+            {"bank_line_id": k, "amount": str(v)} for k, v in sorted(by_line.items())
+        ],
+    }
+
+
 def suspense_aging(store: Store, as_of: date) -> list[dict]:
     """All unapplied cash, bucketed by age, oldest named in each."""
-    items = store.suspense_items()
+    items = [i for i in store.suspense_items() if i.status == "open"]
     out = []
     for low, high, label in BUCKETS:
         members = [
@@ -56,7 +80,9 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
     packs = store.packs(on=day)
     line_ids = {l.bank_line_id for l in lines}
     allocations = [a for a in store.allocations() if a.bank_line_id in {l.bank_line_id for l in lines}]
-    suspense_today = [i for i in store.suspense_items() if i.received_date == day]
+    suspense_today = [
+        i for i in store.suspense_items() if i.received_date == day and i.status == "open"
+    ]
     exceptions_today = [e for e in store.exceptions() if e.first_seen == day and e.code.value != "STALE_SUSPENSE"]
 
     bank_total = sum((l.amount for l in lines), ZERO)
@@ -92,7 +118,8 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
 
     footing_ok = bank_total == allocated_total + suspense_total
     stale = [
-        i for i in store.suspense_items() if i.age_days(day) > policy.stale_suspense_days
+        i for i in store.suspense_items()
+        if i.status == "open" and i.age_days(day) > policy.stale_suspense_days
     ]
     return {
         "date": day.isoformat(),
@@ -124,6 +151,7 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
         "by_broker": {
             k: {kk: str(vv) for kk, vv in v.items()} for k, v in sorted(by_broker.items())
         },
+        "rematch_recoveries": rematch_recoveries(store, day),
         "suspense_aging": suspense_aging(store, day),
         "stale_suspense": [
             {

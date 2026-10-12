@@ -27,9 +27,18 @@ from cash_recon.config import Policy as PolicyConfig  # noqa: E402
 from cash_recon.dataset import build_dataset  # noqa: E402
 from cash_recon.gate import approve_pack  # noqa: E402
 from cash_recon.llm import OfflineReader  # noqa: E402
+from cash_recon.models import (  # noqa: E402
+    BankLine,
+    Broker,
+    Installment,
+    PolicyStatus,
+    Receivable,
+    Remittance,
+)
 from cash_recon.objects import InMemoryObjectStore  # noqa: E402
 from cash_recon.pipeline import ingest_dataset, run_day  # noqa: E402
-from cash_recon.report import suspense_aging  # noqa: E402
+from cash_recon.rematch import rematch_suspense  # noqa: E402
+from cash_recon.report import day_report, suspense_aging  # noqa: E402
 from cash_recon.store import InMemoryStore  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "golden.jsonl"
@@ -67,6 +76,22 @@ def golden_rows() -> list[dict]:
         )
     rows.append({"case": "CONTROL-FOOTING", "kind": "control", "expect": "every day report foots"})
     rows.append({"case": "CONTROL-AGING", "kind": "control", "expect": "seed suspense ages into 31–60 and 60+ buckets"})
+    rows.append({
+        "case": "REMATCH-LATE-ADVICE", "kind": "rematch",
+        "expect": {
+            "recovered_bank_line": "BL-T1", "tier": "T4_REMITTANCE",
+            "pack_id": "PACK-REMATCH-2026-09-08", "item_status": "resolved",
+            "arithmetic_exception": "resolved", "partial_exception": "open",
+            "recoveries_total": "4400.00",
+        },
+    })
+    rows.append({
+        "case": "REMATCH-STAYS-OPEN", "kind": "rematch",
+        "expect": {
+            "still_open_reason": "REMITTANCE_ARITHMETIC", "item_status": "open",
+            "item_amount": "1000.00", "pack_id": None,
+        },
+    })
     return rows
 
 
@@ -89,6 +114,96 @@ def run_pipeline():
         if result["pack_id"]:
             approve_pack(store, result["pack_id"], CONTROLLER, policy)
     return ds, store, outcomes, reports
+
+
+def _mini_policy(number, premium, broker_id="BRK-TEST"):
+    from decimal import Decimal
+
+    return Receivable(
+        policy_number=number, insured_name=f"Insured {number}", broker_id=broker_id,
+        status=PolicyStatus.ACTIVE,
+        installments=[Installment(installment_id=f"{number}-I1", policy_number=number,
+                                  sequence=1, due_date=date(2026, 9, 1), amount_due=premium)],
+    )
+
+
+def _mini_advice(day, lines, total):
+    body = [
+        "Remittance advice — Testline Brokers",
+        "Broker account: BRK-TEST",
+        f"Date: {day}",
+        "",
+        "Premium received for the following policies (net of commission):",
+        *[f"Policy {p} — {name} — {amt:,.2f}" for p, name, amt in lines],
+        "",
+        f"Total remitted: {total:,.2f}",
+    ]
+    return "\n".join(body)
+
+
+def rematch_scenarios() -> dict[str, dict]:
+    """The two planted re-match cases, run in small worlds of their
+    own: gold is what the scenario is built to produce."""
+    from decimal import Decimal as D
+
+    broker = Broker(broker_id="BRK-TEST", name="Testline Brokers", commission_rate=D("0.10"))
+    policy = PolicyConfig()
+
+    # A wire whose advice does not foot; the corrected advice lands
+    # three days later and rescues it.
+    store = InMemoryStore()
+    store.upsert_broker(broker)
+    store.upsert_receivable(_mini_policy("NSP-2001", D("2000.00")))
+    store.upsert_receivable(_mini_policy("NSP-2002", D("3000.00")))
+    store.add_remittance(Remittance(
+        remittance_id="REM-TEST-01", broker_id="BRK-TEST", received_date=date(2026, 9, 5),
+        stated_total=None,
+        text=_mini_advice("2026-09-05", [("NSP-2001", "Alpha Test Co", D("1800.00")),
+                                         ("NSP-2002", "Beta Test Co", D("2700.00"))], D("4500.00"))))
+    store.add_bank_line(BankLine(bank_line_id="BL-T1", value_date=date(2026, 9, 5),
+                                 amount=D("4400.00"), payer_name="Testline Brokers",
+                                 reference=None, narrative="wire — see remittance advice"))
+    run_day(store, InMemoryObjectStore(), OfflineReader(), policy, date(2026, 9, 5), actor=ASSEMBLER)
+    store.add_remittance(Remittance(
+        remittance_id="REM-TEST-02", broker_id="BRK-TEST", received_date=date(2026, 9, 8),
+        stated_total=None,
+        text=_mini_advice("2026-09-08", [("NSP-2001", "Alpha Test Co", D("1700.00")),
+                                         ("NSP-2002", "Beta Test Co", D("2700.00"))], D("4400.00"))))
+    summary = rematch_suspense(store, OfflineReader(), policy, ASSEMBLER, date(2026, 9, 8))
+    item = store.suspense_items()[0]
+    by_code = {e.code.value: e.status for e in store.exceptions()}
+    late_advice = {
+        "recovered_bank_line": summary["recovered"][0]["bank_line_id"],
+        "tier": summary["recovered"][0]["tier"],
+        "pack_id": summary["pack_id"],
+        "item_status": item.status,
+        "arithmetic_exception": by_code["REMITTANCE_ARITHMETIC"],
+        "partial_exception": by_code["PARTIAL"],
+        "recoveries_total": day_report(store, date(2026, 9, 8), policy)["rematch_recoveries"]["recovered_total"],
+    }
+
+    # An advice arrives claiming the wire's total, but its own lines
+    # sum short: the cash stays, under the now-correct code.
+    store2 = InMemoryStore()
+    store2.upsert_broker(broker)
+    store2.upsert_receivable(_mini_policy("NSP-2009", D("1500.00")))
+    store2.add_bank_line(BankLine(bank_line_id="BL-T9", value_date=date(2026, 9, 5),
+                                  amount=D("1000.00"), payer_name="Testline Brokers",
+                                  reference=None, narrative="wire"))
+    run_day(store2, InMemoryObjectStore(), OfflineReader(), policy, date(2026, 9, 5), actor=ASSEMBLER)
+    store2.add_remittance(Remittance(
+        remittance_id="REM-TEST-09", broker_id="BRK-TEST", received_date=date(2026, 9, 7),
+        stated_total=None,
+        text=_mini_advice("2026-09-07", [("NSP-2009", "Iota Test Co", D("950.00"))], D("1000.00"))))
+    summary2 = rematch_suspense(store2, OfflineReader(), policy, ASSEMBLER, date(2026, 9, 7))
+    item2 = store2.suspense_items()[0]
+    stays_open = {
+        "still_open_reason": summary2["still_open"][0]["reason"],
+        "item_status": item2.status,
+        "item_amount": str(item2.amount),
+        "pack_id": summary2["pack_id"],
+    }
+    return {"REMATCH-LATE-ADVICE": late_advice, "REMATCH-STAYS-OPEN": stays_open}
 
 
 def score(rows: list[dict]) -> tuple[int, int, list[str]]:
@@ -151,6 +266,17 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 )
                 if not flagged:
                     problems.append("near-duplicate was not flagged")
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "rematch":
+            observed = rematch_scenarios()[case]
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
             if problems:
                 failures.append(f"{case}: " + "; ".join(problems))
             else:

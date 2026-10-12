@@ -65,10 +65,18 @@
     <div class="cards" id="cards"></div>
     <p id="footing" class="note"></p>
     <h3>By broker</h3><div id="bybroker"></div>
+    <h3>Re-match recoveries this day</h3><div id="rematchreport"></div>
     <h3>Exceptions raised this day</h3><div id="dayexceptions"></div>
   </section>
   <section id="tab-exceptions" class="hidden"><div id="exceptions"></div></section>
-  <section id="tab-suspense" class="hidden"><div id="suspense"></div></section>
+  <section id="tab-suspense" class="hidden">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <button id="rematch" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer">Re-match open suspense</button>
+      <span class="note">Re-runs the tiers for unapplied cash against everything now on the books — late advices, later-booked policies. Recoveries land in a re-match pack at the gate; nothing posts here.</span>
+    </div>
+    <div id="rematch-result"></div>
+    <div id="suspense"></div>
+  </section>
   <section id="tab-packs" class="hidden"><div id="packs"></div></section>
   <section id="tab-audit" class="hidden"><div id="audit"></div></section>
 </main>
@@ -108,6 +116,11 @@ async function loadReport() {
   $("bybroker").innerHTML = table(
     [{key: "broker", label: "Broker / book"}, {key: "bank", label: "Bank", num: 1}, {key: "allocated", label: "Allocated", num: 1}, {key: "suspense", label: "Suspense", num: 1}],
     Object.entries(rep.by_broker).map(([broker, v]) => ({broker, ...v})));
+  const rec = rep.rematch_recoveries || {recovered_lines: 0, recovered_total: "0.00", items: []};
+  $("rematchreport").innerHTML = rec.recovered_lines
+    ? table([{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Recovered", num: 1, render: r => money(r.amount)}], rec.items)
+      + `<p class="note">${rec.recovered_lines} line(s), ${money(rec.recovered_total)} recovered by the re-match pass — proposed at the gate in a PACK-REMATCH pack.</p>`
+    : "<p class='note'>No re-match recoveries on this day.</p>";
   $("dayexceptions").innerHTML = exceptionTable(rep.exceptions);
 }
 function exceptionTable(rows) {
@@ -125,6 +138,27 @@ async function loadSuspense() {
   $("suspense").innerHTML = buckets.map(b => `<h3>${b.bucket} — ${money(b.total)} (${b.count})</h3>` +
     table([{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
            {key: "received_date", label: "Received"}, {key: "age_days", label: "Age (days)", num: 1}, {key: "reason", label: "Reason"}], b.items)).join("");
+}
+async function runRematch() {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — the re-match is a named act.");
+  try {
+    const r = await api("/api/suspense/rematch", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({actor: name, as_of: $("day").value})});
+    const parts = [`Attempted ${r.attempted} open suspense item(s) as of ${r.as_of}.`];
+    if (r.documents_prepared) parts.push(`Prepared ${r.documents_prepared} late document(s) first.`);
+    if (r.recovered.length) parts.push(`<h4>Recovered into ${r.pack_id} (stops at the gate)</h4>` + table(
+      [{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Amount", num: 1, render: x => money(x.amount)}, {key: "tier", label: "Tier"}], r.recovered));
+    if (r.partially_recovered.length) parts.push(`<h4>Partially settled</h4>` + table(
+      [{key: "bank_line_id", label: "Bank line"}, {key: "settled", label: "Settled", num: 1, render: x => money(x.settled)},
+       {key: "remaining", label: "Still open", num: 1, render: x => money(x.remaining)}, {key: "tier", label: "Tier"}], r.partially_recovered));
+    if (r.still_open.length) parts.push(`<h4>Still open</h4>` + table(
+      [{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Amount", num: 1, render: x => money(x.amount)}, {key: "reason", label: "Reason"}], r.still_open));
+    if (!r.recovered.length && !r.partially_recovered.length && !r.still_open.length) parts.push("Nothing was in scope.");
+    $("rematch-result").innerHTML = parts.join("");
+    setStatus(`Re-match complete: ${r.recovered.length} recovered, ${r.partially_recovered.length} partial, ${r.still_open.length} still open.`);
+    loadSuspense(); loadReport();
+  } catch (e) { setStatus(e.message); }
 }
 async function loadPacks() {
   const packs = await api("/api/packs");
@@ -182,6 +216,7 @@ $("seed").addEventListener("click", async () => {
   try { const r = await api("/api/seed", {method: "POST"}); setStatus(`Seeded ${r.policies} policies, ${r.bank_lines} bank lines, ${r.remittances} remittances.`); loadReport(); }
   catch (e) { setStatus(e.message); }
 });
+$("rematch").addEventListener("click", runRematch);
 $("run").addEventListener("click", async () => {
   try {
     const r = await api(`/api/days/${$("day").value}/run`, {method: "POST", headers: {"Content-Type": "application/json"},

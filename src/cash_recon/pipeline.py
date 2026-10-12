@@ -67,6 +67,44 @@ def ingest_dataset(store: Store, objects: ObjectStore, dataset: Dataset) -> None
                                   f"{len(dataset.remittances)} remittances"))
 
 
+def prepare_remittances(store: Store, reader, upto: date) -> int:
+    """Screen and read every remittance received on or before `upto`
+    that no day run has processed yet — a stored embedding is the
+    mark of a screened document. This is how a late advice becomes
+    matchable state outside a day run (the re-match pass calls it):
+    the same screen, the same reader, the same audit events the day
+    graph's screen/read nodes write. Returns how many were prepared.
+    """
+    known = store.embeddings()
+    prepared = 0
+    pending = [
+        r for r in store.remittances()
+        if r.received_date <= upto and r.remittance_id not in known
+    ]
+    for rem in sorted(pending, key=lambda r: (r.received_date, r.remittance_id)):
+        visible, flagged, _hits = documents.screen_text(rem.text)
+        rem.text = visible
+        rem.injection_flagged = flagged
+        vector = documents.embed(visible)
+        duplicate_of = documents.find_near_duplicate(rem.remittance_id, vector, known)
+        store.set_embedding(rem.remittance_id, vector)
+        known[rem.remittance_id] = vector
+        if flagged:
+            store.audit(AuditEvent(at=_now(), actor="document_screen", action="injection_fenced",
+                                   subject=rem.remittance_id,
+                                   detail="Instruction-like text inside the remittance was withheld from the reader."))
+        if duplicate_of:
+            store.audit(AuditEvent(at=_now(), actor="document_screen", action="near_duplicate_flagged",
+                                   subject=rem.remittance_id,
+                                   detail=f"Near-duplicate of {duplicate_of}; flagged for a human, not dropped."))
+        rem.lines = reader.read_remittance(rem.text)
+        if rem.stated_total is None:
+            rem.stated_total = OfflineReader().stated_total(rem.text)
+        store.save_remittance(rem)
+        prepared += 1
+    return prepared
+
+
 class DayState(TypedDict, total=False):
     day: str
     actor: str
@@ -194,6 +232,8 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
         day = date.fromisoformat(state["day"])
         existing = {e.exception_id for e in store.exceptions()}
         for item in store.suspense_items():
+            if item.status != "open":
+                continue
             if item.age_days(day) > policy.stale_suspense_days:
                 exc_id = f"EXC-{item.suspense_id}-STALE_SUSPENSE"
                 if exc_id not in existing:

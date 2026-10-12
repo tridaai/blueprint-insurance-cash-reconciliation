@@ -29,3 +29,5 @@
 {"case": "REM-FERN-01", "kind": "remittance", "lines": {"NSP-1016": "6929.18", "NSP-1025": "19705.04", "NSP-1034": "10440.37"}, "injection": false, "duplicate_of": null}
 {"case": "CONTROL-FOOTING", "kind": "control", "expect": "every day report foots"}
 {"case": "CONTROL-AGING", "kind": "control", "expect": "seed suspense ages into 31\u201360 and 60+ buckets"}
+{"case": "REMATCH-LATE-ADVICE", "kind": "rematch", "expect": {"recovered_bank_line": "BL-T1", "tier": "T4_REMITTANCE", "pack_id": "PACK-REMATCH-2026-09-08", "item_status": "resolved", "arithmetic_exception": "resolved", "partial_exception": "open", "recoveries_total": "4400.00"}}
+{"case": "REMATCH-STAYS-OPEN", "kind": "rematch", "expect": {"still_open_reason": "REMITTANCE_ARITHMETIC", "item_status": "open", "item_amount": "1000.00", "pack_id": null}}

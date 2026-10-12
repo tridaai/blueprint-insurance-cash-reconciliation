@@ -136,6 +136,19 @@ configured age. For a netting mismatch the system drafts the broker
 query note — what was expected, what arrived, the delta. Drafted,
 never sent.
 
+**Re-match.** Information lands after cash does: a broker's corrected
+advice, a policy booked after its wire arrived. The re-match pass
+(API, the console's Suspense tab, or `cash-recon rematch`) takes
+open suspense whose line has no allocations yet and works it through
+the same tiers against the books as they stand now — documents that
+arrived late are screened and read first, exactly as a day run would
+handle them, and a corrected advice supersedes the one that failed.
+Recoveries are proposals, not postings: they land in a
+`PACK-REMATCH-<date>` pack at the same human gate. An item that
+still does not settle stays in suspense with its reason updated to
+the now-correct code, and every attempt — tiers run, outcome — is
+on the item's audit trail.
+
 ## The gate
 
 A posting pack is assembled per day by a named person and approved by
@@ -155,7 +168,9 @@ The control the day is judged by: bank total vs allocated vs posted
 vs in-suspense, by day and by broker. Bank must equal applied plus
 suspense to the cent, or the report says so in words and refuses to
 call the day reconciled. Suspense is aged in buckets (0–7, 8–30,
-31–60, 60+ days) with the oldest items named.
+31–60, 60+ days) with the oldest items named. Cash recovered by the
+re-match pass is shown as its own line for the day the recovery ran,
+by bank line — never folded silently into the day's allocations.
 
 ## Guardrails, as code
 
@@ -199,6 +214,7 @@ src/cash_recon/
   gate.py        packs, approvals, write-offs, the posting file
   report.py      the daily reconciliation report + suspense aging
   pipeline.py    the day run as a LangGraph graph
+  rematch.py     the suspense re-match pass: late information, same tiers, same gate
   store.py       Postgres (production) / SQLite (local) / in-memory (tests)
   objects.py     S3-compatible document storage
   api.py         FastAPI: health, run, gate, reports, console

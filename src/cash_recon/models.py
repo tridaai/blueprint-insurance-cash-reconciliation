@@ -165,6 +165,8 @@ class SuspenseItem(BaseModel):
     amount: Decimal
     received_date: date
     reason: str
+    status: str = "open"  # open | resolved (closed by the re-match pass)
+    resolved_on: date | None = None
 
     def age_days(self, as_of: date) -> int:
         return (as_of - self.received_date).days

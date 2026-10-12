@@ -95,6 +95,24 @@ pack + named approver. Write-offs are pack entries, not edits; a
 write-off above the single-approver limit cannot complete without a
 second, different approver, and both names land on the pack.
 
+**Suspense is re-worked, not just aged.** A day run settles cash
+against the books as they stood on its value date; explanations that
+arrive later — a corrected advice, a policy booked after its wire —
+would otherwise wait for a human to notice them. The re-match pass
+(`rematch.py`) is the explicit counter-move: an operator-invoked run
+over open suspense items whose bank line is wholly unapplied,
+re-entering the same matcher with a context built from current
+state. Late documents are prepared on the spot by the same
+screen-and-read path the day graph uses, and the pairing rule widens
+to claim them (same broker, and the advice's day or its total
+matching the wire; the broker's latest advice wins, and T4's
+arithmetic validation still decides). Every safeguard is inherited
+by construction — per-line footing, duplicate checks, allocations
+assembled into a `PACK-REMATCH-<date>` gate pack — and each attempt
+is audited against the item with the tiers run and the outcome, so
+"we tried on the 8th and the advice still did not foot" is a
+record, not a memory.
+
 ## Stores
 
 - **PostgreSQL** (production): one table per record type, payloads as
