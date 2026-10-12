@@ -75,6 +75,22 @@ No uv? `python3 -m venv .venv && source .venv/bin/activate`, then
 `make install-pip` (the frozen, hash-verified constraints set installs
 first; the package itself second, with `--no-deps`).
 
+Running locally needs **no database setup at all**: with nothing
+configured, records, LangGraph checkpoints and document embeddings
+persist to a single SQLite file (`./data/cashrecon.db`; `SQLITE_PATH`
+moves it). Seed it, run days, restart the server — the desk's state
+is still there, and the CLI's `seed` / `run` / `report` compose
+across invocations on the file. The demo uses a throwaway SQLite
+file so it starts clean every time.
+
+**Switching stores is an env change only.** Set `DATABASE_URL` and
+the same code runs on PostgreSQL — the SQLite dialect in
+`migrations/sqlite/` mirrors the Postgres migrations in
+`migrations/` table for table, money stays decimal-exact TEXT in
+both, and the near-duplicate check computes its cosine in code under
+SQLite instead of leaning on pgvector. Nothing else in the app knows
+which store is running; `/readiness` reports the active one.
+
 Production topology, locally:
 
 ```bash
@@ -183,11 +199,11 @@ src/cash_recon/
   gate.py        packs, approvals, write-offs, the posting file
   report.py      the daily reconciliation report + suspense aging
   pipeline.py    the day run as a LangGraph graph
-  store.py       Postgres (production) / in-memory (test double)
+  store.py       Postgres (production) / SQLite (local) / in-memory (tests)
   objects.py     S3-compatible document storage
   api.py         FastAPI: health, run, gate, reports, console
   static/        the console (one HTML file, no dependencies)
-migrations/      numbered SQL migrations, applied at startup
+migrations/      numbered SQL migrations (PostgreSQL) + sqlite/ (SQLite dialect)
 evals/           the golden-case runner + golden.jsonl
 tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 ```

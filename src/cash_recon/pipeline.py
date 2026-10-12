@@ -224,22 +224,37 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
 
 
 def _checkpointer():
-    """Postgres checkpoints when DATABASE_URL is set (production);
-    in-memory otherwise. A checkpointer failure must not stop the
-    desk, so any error falls back with a logged warning."""
-    import os
+    """Checkpoints follow the store profile (store.store_profile —
+    the same one decision): Postgres saver on the production profile,
+    SQLite saver writing into the same local database file on the
+    local profile. A checkpointer failure must not stop the desk, so
+    any error falls back to memory with a logged warning."""
+    from .store import store_profile
 
-    dsn = os.environ.get("DATABASE_URL")
-    if dsn:
+    kind, target = store_profile()
+    if kind == "postgres":
         try:
             import psycopg
             from langgraph.checkpoint.postgres import PostgresSaver
 
-            saver = PostgresSaver(psycopg.connect(dsn, autocommit=True))
+            saver = PostgresSaver(psycopg.connect(target, autocommit=True))
             saver.setup()
             return saver
         except Exception:
             log.warning("Postgres checkpointer unavailable; using in-memory", exc_info=True)
+        return MemorySaver()
+    try:
+        import sqlite3
+        from pathlib import Path
+
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        saver = SqliteSaver(sqlite3.connect(target, check_same_thread=False))
+        saver.setup()
+        return saver
+    except Exception:
+        log.warning("SQLite checkpointer unavailable; using in-memory", exc_info=True)
     return MemorySaver()
 
 

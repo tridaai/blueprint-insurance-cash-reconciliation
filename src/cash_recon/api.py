@@ -102,6 +102,8 @@ def create_app(service: Service | None = None) -> FastAPI:
         return {
             "ready": store_ok,
             "store": type(s.store).__name__,
+            "profile": getattr(s.store, "profile_name", "unknown"),
+            "database": str(getattr(s.store, "path", "")) or None,
             "objects": type(s.objects).__name__,
             "reader": s.reader.name,
         }

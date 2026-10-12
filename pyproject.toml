@@ -22,6 +22,7 @@ dependencies = [
     "websockets==16.0",
     "langgraph-checkpoint-postgres==3.0.0",
     "psycopg[binary]==3.2.9",
+    "langgraph-checkpoint-sqlite==3.0.1",
 ]
 
 [project.optional-dependencies]

@@ -1,7 +1,9 @@
 """Command line: seed and run days against the configured stores.
 
-With DATABASE_URL / S3_* set this works on the production stores;
-without them it uses the in-memory doubles (a demo, not the desk).
+With DATABASE_URL / S3_* set this works on the production stores.
+Without them the records persist to the local SQLite file
+(SQLITE_PATH, default ./data/cashrecon.db) — so `seed`, `run` and
+`report` compose across invocations with zero database setup.
 """
 
 from __future__ import annotations

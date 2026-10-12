@@ -63,3 +63,12 @@ def test_migrations_are_numbered_and_present():
     files = sorted(p.name for p in Path("migrations").glob("*.sql"))
     assert files == ["0001_core.sql", "0002_document_embeddings.sql"]
     assert "CREATE EXTENSION" in Path("migrations/0001_core.sql").read_text()
+    # The SQLite dialect mirrors the same numbered set, in its own
+    # directory: same semantics, no pgvector, no server extensions.
+    sqlite_files = sorted(p.name for p in Path("migrations/sqlite").glob("*.sql"))
+    assert sqlite_files == files
+    sqlite_core = "\n".join(
+        line for line in Path("migrations/sqlite/0001_core.sql").read_text().splitlines()
+        if not line.lstrip().startswith("--")
+    )
+    assert "CREATE EXTENSION" not in sqlite_core and "JSONB" not in sqlite_core

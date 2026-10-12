@@ -103,13 +103,29 @@ second, different approver, and both names land on the pack.
   are applied by the store at startup; `0002` adds the pgvector
   embedding table. LangGraph checkpoints use the Postgres saver in
   the same database when `DATABASE_URL` is set.
+- **SQLite** (the local store): one file, `./data/cashrecon.db` by
+  default (`SQLITE_PATH` moves it) — the local run needs no database
+  server at all. The SQLite-dialect migrations in
+  `migrations/sqlite/` mirror the Postgres set table for table;
+  payloads are JSON text, money key columns are TEXT decimal strings
+  (never REAL, so SQLite's type affinity never touches a cent), and
+  the LangGraph checkpointer is the SQLite saver writing into the
+  same file. Document embeddings are stored as JSON arrays and the
+  near-duplicate cosine is computed in code over the stored vectors:
+  Postgres leans on pgvector's index, SQLite does the arithmetic
+  itself — same embedder, same threshold, same answers, different
+  machinery. Which store runs is one decision in
+  `store.store_profile()`: `DATABASE_URL` set means Postgres,
+  otherwise SQLite. A behavioural conformance battery runs the same
+  assertions against all three stores, so the implementations
+  cannot silently drift apart.
 - **S3-compatible object storage**: remittance documents, keyed
   `remittances/<id>.txt`. The client is a small SigV4 signer over the
   standard library. In compose, SeaweedFS's S3 gateway serves the
   `minio` hostname; the bucket is created by a one-shot unsigned PUT
   and re-checked by the API at startup.
-- **In-memory doubles** implement the same protocols for tests and
-  the offline demo. They are test doubles only.
+- **In-memory doubles** implement the same protocol for tests and
+  the eval gate. They are test doubles only.
 
 ## Configuration
 
@@ -118,6 +134,8 @@ Policy thresholds live in `config.py` and the environment:
 `STALE_SUSPENSE_DAYS` (30), `NETTING_TOLERANCE` (0.01),
 `DUPLICATE_WINDOW_DAYS` (5). Provider selection is `LLM_BACKEND`
 (`auto` default) plus the provider variables in `.env.example`.
+Store selection is `DATABASE_URL` (PostgreSQL) or `SQLITE_PATH`
+(SQLite file, default `data/cashrecon.db`) — an env change only.
 
 ## What v1 deliberately does not do
 

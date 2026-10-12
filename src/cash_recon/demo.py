@@ -1,15 +1,23 @@
 """Demo: Northgate's September, run end to end, offline.
 
-Seeds the synthetic month into in-memory stores, runs every day
-through the pipeline, and has a named controller approve each pack —
-so the receivables evolve the way they would at a real desk. Prints
-the shape of each day and the closing position: the footing, the
-exception queue, and the suspense aging an auditor would ask for.
+Seeds the synthetic month, runs every day through the pipeline, and
+has a named controller approve each pack — so the receivables evolve
+the way they would at a real desk. Prints the shape of each day and
+the closing position: the footing, the exception queue, and the
+suspense aging an auditor would ask for.
+
+The store is the configured one (Postgres when DATABASE_URL is set,
+the SQLITE_PATH file when that is set); with neither configured the
+demo uses a throwaway SQLite file, so it exercises the real local
+store and still starts clean on every run.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import date
+from pathlib import Path
 
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
@@ -18,15 +26,24 @@ from .llm import OfflineReader
 from .objects import InMemoryObjectStore
 from .pipeline import ingest_dataset, run_day
 from .report import day_report, suspense_aging
-from .store import InMemoryStore
+from .store import SqliteStore, make_store
 
 ASSEMBLER = "cash-team"
 CONTROLLER = "Priya Nair"
 
 
+def _demo_store():
+    if os.environ.get("DATABASE_URL") or os.environ.get("SQLITE_PATH"):
+        return make_store()
+    path = Path(tempfile.mkdtemp(prefix="cash-recon-demo-")) / "cashrecon.db"
+    return SqliteStore(path)
+
+
 def main() -> None:
     ds = build_dataset()
-    store, objects = InMemoryStore(), InMemoryObjectStore()
+    store, objects = _demo_store(), InMemoryObjectStore()
+    where = getattr(store, "path", None)
+    print(f"Store: {type(store).__name__}" + (f" at {where}" if where else ""))
     ingest_dataset(store, objects, ds)
     reader, policy = OfflineReader(), PolicyConfig()
 

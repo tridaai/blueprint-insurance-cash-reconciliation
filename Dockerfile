@@ -13,6 +13,11 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin/cash-recon* /usr/local/bin/
 COPY migrations ./migrations
+# The production profile uses Postgres (compose sets DATABASE_URL).
+# The image can also run the local SQLite profile: leave DATABASE_URL
+# unset and the store lands in ./data (SQLITE_PATH moves it, e.g. to
+# a mounted volume at /data/cashrecon.db).
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
 USER appuser
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --retries=10 \
