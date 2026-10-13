@@ -24,10 +24,11 @@ import csv
 import io
 from datetime import date, datetime, timezone
 
+from . import webhooks
 from .config import Policy as PolicyConfig
 from .gate import GateError
 from .models import AuditEvent, PayableEvent, PayoutEntry, PayoutPack
-from .money import ZERO
+from .money import ZERO, as_str
 from .store import Store
 
 
@@ -92,6 +93,10 @@ def assemble_payout_pack(store: Store, day: date, payable_ids: list[str],
     store.audit(AuditEvent(
         at=_now(), actor=assembled_by, action="payout_pack_assembled", subject=pack_id,
         detail=f"{len(entries)} payable(s), total {pack.total}; stops at the gate"))
+    webhooks.emit(store, "pack_assembled", pack_id, assembled_by, {
+        "payouts": as_str(pack.total),
+        "payables": str(len(entries)),
+    }, pack_kind="payout")
     return pack
 
 
@@ -152,6 +157,10 @@ def approve_payout_pack(store: Store, pack_id: str, approver: str,
         at=_now(), actor=approver, action="payout_pack_approved", subject=pack_id,
         detail=f"payouts {pack.total} across {len(pack.entries)} payable(s), "
                f"approvals: {', '.join(pack.approvals)}"))
+    webhooks.emit(store, "pack_approved", pack_id, approver, {
+        "payouts": as_str(pack.total),
+        "payables": str(len(pack.entries)),
+    }, pack_kind="payout")
     return pack
 
 
@@ -170,6 +179,10 @@ def reject_payout_pack(store: Store, pack_id: str, actor: str, reason: str) -> P
     store.save_payout_pack(pack)
     store.audit(AuditEvent(at=_now(), actor=actor, action="payout_pack_rejected",
                            subject=pack_id, detail=reason))
+    webhooks.emit(store, "pack_rejected", pack_id, actor, {
+        "payouts": as_str(pack.total),
+        "payables": str(len(pack.entries)),
+    }, pack_kind="payout")
     return pack
 
 

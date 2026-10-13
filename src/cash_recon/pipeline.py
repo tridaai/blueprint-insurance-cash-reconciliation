@@ -28,7 +28,7 @@ from typing import TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from . import documents, gate
+from . import documents, gate, webhooks
 from .config import Policy as PolicyConfig
 from .dataset import Dataset
 from .llm import OfflineReader
@@ -276,6 +276,10 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
         store.save_allocations([e.allocation for e in pack.entries if e.allocation], pack.pack_id)
         store.audit(AuditEvent(at=_now(), actor=state["actor"], action="pack_assembled", subject=pack.pack_id,
                                detail=f"{len(pack.entries)} entries, allocations {pack.allocation_total}"))
+        webhooks.emit(store, "pack_assembled", pack.pack_id, state["actor"], {
+            "allocations": str(pack.allocation_total),
+            "entries": str(len(pack.entries)),
+        }, pack_kind="posting")
         return {"pack_id": pack.pack_id}
 
     def sweep(state: DayState) -> DayState:

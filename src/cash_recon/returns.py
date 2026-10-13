@@ -38,7 +38,7 @@ import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from . import gate
+from . import gate, webhooks
 from .models import (
     AuditEvent,
     InstallmentStatus,
@@ -220,6 +220,11 @@ def record_return(store: Store, bank_line_id: str, reason, actor: str,
     store.audit(AuditEvent(
         at=_now(), actor=actor, action="payment_returned", subject=bank_line_id,
         detail=ret.detail + f" Packs flagged RETURN_AFFECTED: {', '.join(flagged) or 'none'}."))
+    webhooks.emit(store, "return_recorded", bank_line_id, actor, {
+        "amount": str(ret.amount),
+        "reason": ret.reason.value,
+        "return_id": ret.return_id,
+    })
     return ret
 
 

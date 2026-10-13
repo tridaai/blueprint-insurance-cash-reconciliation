@@ -27,7 +27,7 @@ import json
 import logging
 from datetime import date, datetime, time, timezone
 
-from . import gate
+from . import gate, webhooks
 from .config import Policy as PolicyConfig
 from .matcher import MatchContext, match_line
 from .models import AuditEvent, ExceptionCode
@@ -241,6 +241,10 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         store.audit(AuditEvent(at=stamp, actor=actor, action="pack_assembled", subject=pack.pack_id,
                                detail=f"{len(pack.entries)} re-match entries, allocations "
                                       f"{pack.allocation_total}; stops at the gate"))
+        webhooks.emit(store, "pack_assembled", pack.pack_id, actor, {
+            "allocations": str(pack.allocation_total),
+            "entries": str(len(pack.entries)),
+        }, pack_kind="posting")
         pack_id = pack.pack_id
 
     for item, detail in attempts:

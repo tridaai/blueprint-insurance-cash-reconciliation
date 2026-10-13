@@ -26,6 +26,7 @@ import io
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from . import webhooks
 from .config import Policy as PolicyConfig
 from .matcher import LineOutcome
 from .models import (
@@ -39,7 +40,7 @@ from .models import (
     PostingPack,
     Tier,
 )
-from .money import ZERO, cents, net_of
+from .money import ZERO, as_str, cents, net_of
 
 
 class GateError(RuntimeError):
@@ -291,6 +292,11 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
                            detail=f"allocations {pack.allocation_total}, write-offs {pack.write_off_total}, "
                                   f"payable offsets {pack.offset_total}, "
                                   f"approvals: {', '.join(pack.approvals)}"))
+    webhooks.emit(store, "pack_approved", pack_id, approver, {
+        "allocations": as_str(pack.allocation_total),
+        "write_offs": as_str(pack.write_off_total),
+        "payable_offsets": as_str(pack.offset_total),
+    }, pack_kind="posting")
     return pack
 
 
@@ -330,6 +336,11 @@ def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
     pack.decided_at = _now()
     store.save_pack(pack)
     store.audit(AuditEvent(at=_now(), actor=actor, action="pack_rejected", subject=pack_id, detail=reason))
+    webhooks.emit(store, "pack_rejected", pack_id, actor, {
+        "allocations": as_str(pack.allocation_total),
+        "write_offs": as_str(pack.write_off_total),
+        "payable_offsets": as_str(pack.offset_total),
+    }, pack_kind="posting")
     return pack
 
 

@@ -17,7 +17,8 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
-from . import gate, report as report_mod
+from . import gate, webhooks
+from . import report as report_mod
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import WatchPolicy
@@ -169,6 +170,7 @@ def create_app(service: Service | None = None) -> FastAPI:
             "database": str(getattr(s.store, "path", "")) or None,
             "objects": type(s.objects).__name__,
             "reader": s.reader.name,
+            "webhooks": webhooks.webhook_status(),
         }
 
     @app.get("/", response_class=HTMLResponse)
