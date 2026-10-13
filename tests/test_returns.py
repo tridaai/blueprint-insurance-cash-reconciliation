@@ -178,7 +178,8 @@ def test_return_releases_suspense_and_the_close_pack_foots():
     assert roll["received_into_suspense"] == "200.00"
     assert roll["returned_from_suspense"] == "200.00"
     assert roll["closing_suspense"] == "0.00"
-    assert roll["returns_in_month"] == {"count": 1, "total": "1200.00"}
+    assert roll["returns_in_month"] == {
+        "count": 1, "total": "1200.00", "totals_by_currency": {"USD": "1200.00"}}
     assert export["pack"]["payment_returns_in_month"][0]["reason"] == "RECALL"
     text = render_close_pack_text(export)
     assert "Returned from suspense" in text and "RET-BL-R3" in text

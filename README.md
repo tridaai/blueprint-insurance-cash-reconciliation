@@ -796,8 +796,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 179 tests,
-67/67 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 192 tests,
+68/68 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, the offline fallback is what the demo and the
