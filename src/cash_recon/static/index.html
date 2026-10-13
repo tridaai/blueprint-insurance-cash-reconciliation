@@ -113,6 +113,13 @@
     </div>
     <p class="note">The period control: the suspense roll for the month, every pack approved in it, the exceptions opened and closed, suspense aging at month end, and the month's broker scorecard — with a SHA-256 digest over the pack body. Assembling it changes nothing in the books; closing a month here is a report, not a lock.</p>
     <div id="close-pack"></div>
+    <h3>Match quality trend</h3>
+    <p class="note">Per month on the books: the auto-applied rate (bank value settled with no human touch beyond the gate), the tier mix, the exception mix, average suspense dwell, the re-match recovery rate, and the return rate — with month-over-month deltas computed in code. The watch names deteriorations only, against the tolerances in config; otherwise it says within tolerance, with the figures.</p>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
+      <button id="load-trends" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:#fff; color:var(--accent); cursor:pointer">Load the trend watch</button>
+      <span class="note" id="trends-status"></span>
+    </div>
+    <div id="trends"></div>
   </section>
   <section id="tab-scorecard" class="hidden">
     <p class="note">Per broker, over everything on the books: how their cash arrives, how cleanly their netting settles, and what is still open against them. The money columns are the daily reports' by-broker split, summed. Query notes are drafts the system wrote for review — nothing here sends anything.</p>
@@ -317,6 +324,36 @@ async function loadClose() {
     (p.discrepancies.length ? `<h3>Discrepancies</h3>` + table(
       [{key: "suspense_id", label: "Item"}, {key: "problem", label: "Problem"},
        {key: "amount", label: "Amount at issue", num: 1, render: r => money(r.amount)}], p.discrepancies) : "");
+}
+async function loadTrends() {
+  const t = await api("/api/trends");
+  const w = t.watch;
+  const verdict = w.status === "findings"
+    ? `<p><span class="pill bad">Watch: ${w.findings.length} named deterioration(s)</span></p>` +
+      w.findings.map(f => `<p class="note" style="white-space:pre-wrap; border-left:3px solid var(--line); padding-left:10px">${f.kind}${f.code ? " — " + f.code : ""}: ${f.detail}</p>`).join("")
+    : `<p><span class="pill">Watch: within tolerance</span></p><p class="note">${w.note}</p>`;
+  const rows = t.months.map(m => ({
+    ...m,
+    tier_summary: Object.entries(m.tier_mix).map(([tier, s]) => `${tier} ${money(s.value)}`).join(" · ") || "—",
+    exc_summary: Object.entries(m.exception_mix).map(([code, s]) => `${code} ×${s.count} — ${money(s.value)}`).join(" · ") || "—",
+    auto_rate: m.auto_applied_rate === null ? "—" : (Number(m.auto_applied_rate) * 100).toFixed(2) + "%",
+    dwell: m.avg_suspense_dwell_days === null ? "—" : `${m.avg_suspense_dwell_days} days (${m.suspense_resolved_items} resolved)`,
+    recovery: m.rematch.recovery_rate === null ? "—" : `${(Number(m.rematch.recovery_rate) * 100).toFixed(1)}% (${m.rematch.recovered}/${m.rematch.attempted})`,
+    returns_v: `${m.returns.count} — ${money(m.returns.value)}`,
+    deltas_v: Object.entries(m.deltas || {}).filter(([, v]) => v !== null).map(([k, v]) => `${k}: ${v}`).join(" · ") || "—",
+  }));
+  $("trends").innerHTML = verdict + table(
+    [{key: "month", label: "Month"}, {key: "bank_value", label: "Bank", num: 1, render: r => money(r.bank_value)},
+     {key: "allocated_value", label: "Allocated", num: 1, render: r => money(r.allocated_value)},
+     {key: "auto_rate", label: "Auto-applied rate", num: 1},
+     {key: "tier_summary", label: "Tier mix by value"},
+     {key: "exc_summary", label: "Exception mix"},
+     {key: "suspense_received_value", label: "Into suspense", num: 1, render: r => money(r.suspense_received_value)},
+     {key: "dwell", label: "Avg suspense dwell"},
+     {key: "recovery", label: "Re-match recovery"},
+     {key: "returns_v", label: "Returns"},
+     {key: "deltas_v", label: "Deltas vs prior month"}], rows);
+  $("trends-status").textContent = `${t.months.length} month(s) on the books.`;
 }
 async function loadScorecard() {
   const rows = await api(`/api/brokers/scorecard?as_of=${$("day").value}`);
@@ -601,6 +638,7 @@ $("audit-go-json").addEventListener("click", () => {
 $("cancel-go").addEventListener("click", recordCancellation);
 $("payout-assemble").addEventListener("click", assemblePayouts);
 $("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
+$("load-trends").addEventListener("click", () => loadTrends().catch(e => setStatus(e.message)));
 $("import-go").addEventListener("click", runImport);
 $("import-file").addEventListener("change", async (ev) => {
   const file = ev.target.files[0];

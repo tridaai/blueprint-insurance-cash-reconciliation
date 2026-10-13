@@ -43,3 +43,47 @@ class Policy:
                 "DUPLICATE_WINDOW_DAYS", cls.duplicate_window_days
             ),
         )
+
+
+@dataclass(frozen=True)
+class WatchPolicy:
+    """The match-quality watch's tolerances, in the same one place.
+
+    The trend watch (trends.py) names a deterioration only when a
+    movement crosses one of these lines: the auto-applied rate
+    falling by more than `auto_rate_drop_points` month over month,
+    an exception code's share of bank value multiplying by
+    `exception_share_doubling_factor` (and reaching at least
+    `exception_share_floor`, so a code doubling from nothing to
+    nearly nothing is not a finding), or average suspense dwell
+    rising by more than `suspense_dwell_rise_days`. Inside the
+    lines, the watch says "within tolerance" — explicitly, with
+    the figures — rather than staying silent.
+    """
+
+    auto_rate_drop_points: Decimal = Decimal("0.05")
+    exception_share_doubling_factor: Decimal = Decimal("2")
+    exception_share_floor: Decimal = Decimal("0.01")
+    suspense_dwell_rise_days: Decimal = Decimal("2")
+
+    @classmethod
+    def from_env(cls) -> "WatchPolicy":
+        def dec(name, default):
+            raw = os.environ.get(name)
+            return Decimal(raw) if raw else default
+
+        return cls(
+            auto_rate_drop_points=dec(
+                "WATCH_AUTO_RATE_DROP_POINTS", cls.auto_rate_drop_points
+            ),
+            exception_share_doubling_factor=dec(
+                "WATCH_EXCEPTION_SHARE_DOUBLING_FACTOR",
+                cls.exception_share_doubling_factor,
+            ),
+            exception_share_floor=dec(
+                "WATCH_EXCEPTION_SHARE_FLOOR", cls.exception_share_floor
+            ),
+            suspense_dwell_rise_days=dec(
+                "WATCH_SUSPENSE_DWELL_RISE_DAYS", cls.suspense_dwell_rise_days
+            ),
+        )

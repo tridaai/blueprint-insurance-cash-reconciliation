@@ -20,7 +20,9 @@ from pydantic import BaseModel
 from . import gate, report as report_mod
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
+from .config import WatchPolicy
 from .line_export import LineExportError, line_export, render_line_export_text
+from .trends import match_quality
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .gate import GateError
@@ -263,6 +265,11 @@ def create_app(service: Service | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return close_pack_export(s.store, year, mon)
+
+    @app.get("/api/trends")
+    def trends():
+        s = get_service()
+        return match_quality(s.store, WatchPolicy.from_env())
 
     @app.get("/api/close/{month}/text")
     def close_text(month: str):

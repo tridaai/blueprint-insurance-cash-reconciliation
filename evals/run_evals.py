@@ -224,6 +224,20 @@ def golden_rows() -> list[dict]:
         },
     })
     rows.append({
+        "case": "TREND-WATCH", "kind": "trend",
+        "expect": {
+            "sept_bank_foots": True, "sept_allocated_foots": True,
+            "oct_bank_foots": True, "oct_allocated_foots": True,
+            "sept_suspense_received": "61086.99",
+            "oct_suspense_received": "12810.76",
+            "sept_suspense_close_agrees": True,
+            "oct_suspense_close_agrees": True,
+            "oct_mismatch_value": "100.00",
+            "watch_compared": ["2026-09", "2026-10"],
+            "watch_status_named": True, "watch_note_explicit": True,
+        },
+    })
+    rows.append({
         "case": "AUDIT-EXPORT", "kind": "line_export",
         "expect": {
             "rich_attempt_stages": ["T4_REMITTANCE"],
@@ -940,6 +954,54 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 passed += 1
         elif row["kind"] == "import":
             observed = import_scenario()
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "trend":
+            from decimal import Decimal
+
+            from cash_recon.close_pack import build_close_pack
+            from cash_recon.config import WatchPolicy
+            from cash_recon.trends import match_quality
+
+            trend_policy = PolicyConfig()
+            trend = match_quality(store, WatchPolicy())
+            tmonths = {m["month"]: m for m in trend["months"]}
+
+            def day_sums(year, month):
+                days = sorted({l.value_date for l in store.bank_lines()
+                               if (l.value_date.year, l.value_date.month) == (year, month)})
+                bank = sum((Decimal(day_report(store, d, trend_policy)["bank_total"]) for d in days), Decimal("0"))
+                alloc = sum((Decimal(day_report(store, d, trend_policy)["allocated_total"]) for d in days), Decimal("0"))
+                return bank, alloc
+
+            sept_bank, sept_alloc = day_sums(2026, 9)
+            oct_bank, oct_alloc = day_sums(2026, 10)
+            sept_roll = build_close_pack(store, 2026, 9)["control_roll"]
+            oct_roll = build_close_pack(store, 2026, 10)["control_roll"]
+            note = trend["watch"]["note"].lower()
+            observed = {
+                "sept_bank_foots": Decimal(tmonths["2026-09"]["bank_value"]) == sept_bank,
+                "sept_allocated_foots": Decimal(tmonths["2026-09"]["allocated_value"]) == sept_alloc,
+                "oct_bank_foots": Decimal(tmonths["2026-10"]["bank_value"]) == oct_bank,
+                "oct_allocated_foots": Decimal(tmonths["2026-10"]["allocated_value"]) == oct_alloc,
+                "sept_suspense_received": tmonths["2026-09"]["suspense_received_value"],
+                "oct_suspense_received": tmonths["2026-10"]["suspense_received_value"],
+                "sept_suspense_close_agrees":
+                    tmonths["2026-09"]["suspense_received_value"] == sept_roll["received_into_suspense"],
+                "oct_suspense_close_agrees":
+                    tmonths["2026-10"]["suspense_received_value"] == oct_roll["received_into_suspense"],
+                "oct_mismatch_value": tmonths["2026-10"]["exception_mix"]["NETTING_MISMATCH"]["value"],
+                "watch_compared": trend["watch"]["compared"],
+                "watch_status_named": trend["watch"]["status"] in ("findings", "within tolerance"),
+                "watch_note_explicit": "within tolerance" in note or "deterioration" in note,
+            }
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()

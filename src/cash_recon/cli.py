@@ -14,7 +14,9 @@ from datetime import date
 
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
+from .config import WatchPolicy
 from .line_export import LineExportError, line_export, render_line_export_text
+from .trends import match_quality
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .gate import GateError
@@ -50,6 +52,7 @@ def main() -> None:
     clo = sub.add_parser("close", help="print a month-end close pack (a report, not a lock)")
     clo.add_argument("month", help="YYYY-MM")
     clo.add_argument("--format", choices=("json", "text"), default="json")
+    sub.add_parser("trends", help="the match-quality trend watch: per-month figures, deltas, and named deteriorations (or within tolerance)")
     imp = sub.add_parser("import-statement", help="import a generic bank statement CSV")
     imp.add_argument("path", help="path to the statement CSV")
     ret = sub.add_parser("return", help="record a bank return against an applied bank line")
@@ -124,6 +127,8 @@ def main() -> None:
     elif args.command == "scorecard":
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         print(json.dumps(broker_scorecard(store, as_of), indent=2))
+    elif args.command == "trends":
+        print(json.dumps(match_quality(store, WatchPolicy.from_env()), indent=2))
     elif args.command == "close":
         year, month = parse_month(args.month)
         export = close_pack_export(store, year, month)
