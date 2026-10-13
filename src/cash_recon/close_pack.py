@@ -44,6 +44,16 @@ the month's netted total below is that term summed.
 The pack body contains no wall-clock stamps. Its SHA-256 digest is
 computed over the canonical body, so the exported JSON and the
 human-readable text rendering are two views of one record.
+
+The suspense identity holds PER CURRENCY: on a book that holds
+more than one, the roll runs in each currency separately — opening
++ received − applied − returned = closing in EUR and in USD alike,
+never a blended figure — and the headline roll is the functional
+currency's (USD). Beside the rolls, the pack carries functional
+equivalents of the closing suspense at month-end governed rates,
+labelled as translations: they present the position in one
+currency for a reader; they are not postings, and no control in
+the pack runs on them.
 """
 
 from __future__ import annotations
@@ -55,6 +65,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
+from .fx import FUNCTIONAL_CURRENCY, rate_on, to_functional
 from .models import ReturnPremiumPayable
 from .money import ZERO, as_str
 from .nonpremium import non_premium_ledger
@@ -242,15 +253,23 @@ def _aging(positions: list[_Position], as_of: date) -> list[dict]:
             and (high is None or pos.item.age_days(as_of) <= high)
         ]
         bucket.sort(key=lambda pa: pa[0].item.received_date)
+        totals_by_currency: dict[str, Decimal] = {}
+        for pos, amount in bucket:
+            ccy = pos.item.currency
+            totals_by_currency[ccy] = totals_by_currency.get(ccy, ZERO) + amount
         out.append({
             "bucket": label,
             "total": as_str(sum((amount for _p, amount in bucket), ZERO)),
+            "totals_by_currency": {
+                ccy: as_str(total) for ccy, total in sorted(totals_by_currency.items())
+            },
             "count": len(bucket),
             "items": [
                 {
                     "suspense_id": pos.item.suspense_id,
                     "bank_line_id": pos.item.bank_line_id,
                     "amount": as_str(amount),
+                    "currency": pos.item.currency,
                     "received_date": pos.item.received_date.isoformat(),
                     "age_days": pos.item.age_days(as_of),
                     "reason": pos.item.reason,
@@ -291,29 +310,64 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
                                f"{as_str(reconstructed)}",
                 })
 
-    opening = sum(
-        (pos.open_at(day_before) for pos in positions if pos.item.received_date < first),
-        ZERO,
+    # The suspense identity runs per currency: each currency's
+    # positions roll on their own — opening + received − applied
+    # − returned = closing, in that currency — and the headline
+    # roll is the functional currency's. On a single-currency book
+    # the headline roll is the whole roll, exactly as before.
+    def _roll(subset: list[_Position]) -> dict:
+        r_opening = sum(
+            (pos.open_at(day_before) for pos in subset if pos.item.received_date < first),
+            ZERO,
+        )
+        r_received = sum(
+            ((pos.created if pos.created is not None else pos.item.amount)
+             for pos in subset if in_month(pos.item.received_date)),
+            ZERO,
+        )
+        r_applied = sum(
+            (amt for pos in subset for d, amt in pos.releases if in_month(d)),
+            ZERO,
+        )
+        r_returned = sum(
+            (pos.released_by_return() for pos in subset
+             if pos.returned_on is not None and in_month(pos.returned_on)),
+            ZERO,
+        )
+        r_closing = sum(
+            (pos.open_at(last) for pos in subset if pos.item.received_date <= last),
+            ZERO,
+        )
+        r_roll_closing = r_opening + r_received - r_applied - r_returned
+        return {
+            "opening": r_opening, "received": r_received, "applied": r_applied,
+            "returned": r_returned, "closing": r_closing,
+            "roll_closing": r_roll_closing, "difference": r_roll_closing - r_closing,
+        }
+
+    item_currency = {pos.item.suspense_id: pos.item.currency for pos in positions}
+    currencies_present = sorted(
+        {pos.item.currency for pos in positions}
+        | {l.currency for l in lines.values() if in_month(l.value_date)}
     )
-    received = sum(
-        (pos.created if pos.created is not None else pos.item.amount)
-        for pos in positions if in_month(pos.item.received_date)
-    ) if positions else ZERO
-    applied = sum(
-        (amt for pos in positions for d, amt in pos.releases if in_month(d)),
-        ZERO,
-    )
-    returned_from_suspense = sum(
-        (pos.released_by_return() for pos in positions
-         if pos.returned_on is not None and in_month(pos.returned_on)),
-        ZERO,
-    )
-    closing = sum(
-        (pos.open_at(last) for pos in positions if pos.item.received_date <= last),
-        ZERO,
-    )
-    roll_closing = opening + received - applied - returned_from_suspense
-    difference = roll_closing - closing
+    rolls: dict[str, dict] = {}
+    for ccy in currencies_present:
+        subset = [pos for pos in positions if pos.item.currency == ccy]
+        roll = _roll(subset)
+        ccy_discrepancies = [
+            d for d in discrepancies
+            if item_currency.get(d.get("suspense_id")) == ccy
+        ]
+        roll["footed"] = roll["difference"] == 0 and not ccy_discrepancies
+        rolls[ccy] = roll
+    headline = rolls.get(FUNCTIONAL_CURRENCY) or _roll([])
+    opening = headline["opening"]
+    received = headline["received"]
+    applied = headline["applied"]
+    returned_from_suspense = headline["returned"]
+    closing = headline["closing"]
+    roll_closing = headline["roll_closing"]
+    difference = headline["difference"]
 
     month_returns = [r for r in store.returns() if in_month(r.return_date)]
 
@@ -343,8 +397,14 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         applied_approved += pack.allocation_total
 
     cash_received = sum(
-        (l.amount for l in lines.values() if in_month(l.value_date)), ZERO
+        (l.amount for l in lines.values()
+         if in_month(l.value_date) and l.currency == FUNCTIONAL_CURRENCY), ZERO
     )
+    cash_received_by_currency: dict[str, Decimal] = {}
+    for l in lines.values():
+        if in_month(l.value_date):
+            cash_received_by_currency[l.currency] = (
+                cash_received_by_currency.get(l.currency, ZERO) + l.amount)
 
     def exc_view(e):
         return {
@@ -354,6 +414,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             "policy_number": e.policy_number,
             "broker_id": e.broker_id,
             "amount": as_str(e.amount),
+            "currency": e.currency,
             "disposition": e.status,
             "first_seen": e.first_seen.isoformat(),
             "detail": e.detail,
@@ -366,8 +427,11 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         if e.status != "open" and e.first_seen <= last
     ]
 
-    footed = difference == 0 and not discrepancies
-    if footed:
+    footed = all(roll["footed"] for roll in rolls.values()) if rolls else (
+        difference == 0 and not discrepancies
+    )
+    multi_currency = len(currencies_present) > 1
+    if footed and not multi_currency:
         footing_note = (
             "The month FOOTS: opening suspense + cash received into suspense "
             "− applied from suspense"
@@ -375,12 +439,59 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             + " = closing suspense, to the cent, and the "
             "closing figure agrees with the suspense ledger."
         )
-    else:
+    elif footed:
+        footing_note = (
+            "The month FOOTS in each currency: opening suspense + cash "
+            "received into suspense − applied from suspense − returned from "
+            "suspense = closing suspense, per currency, to the cent, and "
+            "each currency's closing figure agrees with the suspense "
+            "ledger. The functional figures below are translations at "
+            "month-end rates — presentation, not postings."
+        )
+    elif not multi_currency:
         bits = []
         if difference != 0:
             bits.append(f"the control roll misses the ledger by {as_str(difference)}")
         bits += [d["problem"] for d in discrepancies]
         footing_note = "NOT FOOTED: " + "; ".join(bits) + "."
+    else:
+        bits = [
+            f"in {ccy} the control roll misses the ledger by "
+            f"{as_str(roll['difference'])}"
+            for ccy, roll in sorted(rolls.items()) if roll["difference"] != 0
+        ]
+        bits += [d["problem"] for d in discrepancies]
+        footing_note = "NOT FOOTED: " + "; ".join(bits) + "."
+
+    # Functional equivalents of the closing position, at the
+    # governed rates in force on the month's last day. Translations
+    # for presentation only — labelled as such, never posted, and
+    # no control in this pack runs on them.
+    month_end_rates = {
+        ccy: str(rate_on(ccy, last))
+        for ccy in currencies_present if ccy != FUNCTIONAL_CURRENCY
+    }
+    closing_translated = {
+        ccy: as_str(to_functional(roll["closing"], ccy, last))
+        for ccy, roll in sorted(rolls.items())
+    }
+    functional_section = {
+        "currency": FUNCTIONAL_CURRENCY,
+        "month_end_rates": month_end_rates,
+        "closing_suspense_translated": closing_translated,
+        "closing_suspense_functional_total": as_str(sum(
+            (Decimal(v) for v in closing_translated.values()), ZERO)),
+        "note": (
+            "Translations at the governed rates in force on the month's "
+            "last day, for presentation only: they are not postings, and "
+            "no control in this pack runs on a translated figure. The "
+            "suspense identity above holds per currency, in the currency."
+        ),
+    }
+    returns_by_currency: dict[str, Decimal] = {}
+    for r in month_returns:
+        returns_by_currency[r.currency] = (
+            returns_by_currency.get(r.currency, ZERO) + r.amount)
 
     body = {
         "month": f"{year:04d}-{month:02d}",
@@ -391,12 +502,33 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
                 [p for p in positions if p.item.received_date < first], day_before
             ),
             "cash_received_in_month": as_str(cash_received),
+            "cash_received_in_month_by_currency": {
+                ccy: as_str(total)
+                for ccy, total in sorted(cash_received_by_currency.items())
+            },
             "received_into_suspense": as_str(received),
             "applied_from_suspense": as_str(applied),
             "returned_from_suspense": as_str(returned_from_suspense),
             "returns_in_month": {
                 "count": len(month_returns),
                 "total": as_str(sum((r.amount for r in month_returns), ZERO)),
+                "totals_by_currency": {
+                    ccy: as_str(total)
+                    for ccy, total in sorted(returns_by_currency.items())
+                },
+            },
+            "by_currency": {
+                ccy: {
+                    "opening_suspense": as_str(roll["opening"]),
+                    "received_into_suspense": as_str(roll["received"]),
+                    "applied_from_suspense": as_str(roll["applied"]),
+                    "returned_from_suspense": as_str(roll["returned"]),
+                    "closing_suspense": as_str(roll["closing"]),
+                    "roll_closing_suspense": as_str(roll["roll_closing"]),
+                    "difference": as_str(roll["difference"]),
+                    "footed": roll["footed"],
+                }
+                for ccy, roll in sorted(rolls.items())
             },
             "applied_allocations_approved": as_str(applied_approved),
             "approved_write_offs": as_str(write_offs),
@@ -406,6 +538,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             "footed": footed,
             "footing_note": footing_note,
         },
+        "functional": functional_section,
         "return_premiums": _payable_roll(store, first, last),
         "payment_returns_in_month": [
             {
@@ -414,6 +547,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
                 "reason": r.reason.value,
                 "return_date": r.return_date.isoformat(),
                 "amount": as_str(r.amount),
+                "currency": r.currency,
                 "recorded_by": r.recorded_by,
                 "pack_ids": list(r.pack_ids),
                 "detail": r.detail,
@@ -460,6 +594,7 @@ def _combination_section(store: Store, first: date, last: date) -> dict:
                     "status": pack.status.value,
                     "policy_number": entry.allocation.policy_number,
                     "installment_id": entry.allocation.installment_id,
+                    "currency": entry.allocation.currency,
                     "legs": [],
                     "cash_total": ZERO,
                 })
@@ -515,6 +650,39 @@ def render_close_pack_text(export: dict) -> str:
         f"  Approved write-offs:         {roll['approved_write_offs']:>12}  (receivable deltas; they do not release suspense cash)",
         f"  Closing suspense:            {roll['closing_suspense']:>12}",
         f"  {roll['footing_note']}",
+    ]
+    by_currency = roll.get("by_currency") or {}
+    if len(by_currency) > 1:
+        out += ["", "CONTROL ROLL BY CURRENCY (the identity holds in each currency)"]
+        for ccy, r in by_currency.items():
+            out.append(
+                f"  {ccy}: opening {r['opening_suspense']} + received into suspense "
+                f"{r['received_into_suspense']} − applied {r['applied_from_suspense']} "
+                f"− returned {r['returned_from_suspense']} = closing "
+                f"{r['closing_suspense']} — {'FOOTS' if r['footed'] else 'NOT FOOTED'}"
+            )
+        cash_by_ccy = roll.get("cash_received_in_month_by_currency") or {}
+        out.append(
+            "  Cash received in month by currency: "
+            + ", ".join(f"{ccy} {total}" for ccy, total in cash_by_ccy.items())
+            + "  (the headline roll above is the functional currency's)"
+        )
+        functional = body.get("functional") or {}
+        if functional.get("month_end_rates"):
+            rates = ", ".join(
+                f"{ccy} {rate}" for ccy, rate in functional["month_end_rates"].items())
+            translated = ", ".join(
+                f"{ccy} {amount}"
+                for ccy, amount in functional["closing_suspense_translated"].items())
+            out += [
+                "",
+                "FUNCTIONAL TRANSLATIONS (presentation only — not postings)",
+                f"  Month-end governed rates: {rates}",
+                f"  Closing suspense translated: {translated}",
+                f"  Closing suspense, functional total: "
+                f"{functional['closing_suspense_functional_total']}",
+            ]
+    out += [
         "",
         f"POSTING PACKS APPROVED IN THE MONTH ({len(body['packs_approved_in_month'])})",
     ]

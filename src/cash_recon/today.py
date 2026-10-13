@@ -27,10 +27,22 @@ def _step(key: str, label: str, state: str, detail: str, tab: str) -> dict:
     return {"key": key, "label": label, "state": state, "detail": detail, "tab": tab}
 
 
+def _amounts_by_currency(amounts) -> str:
+    """A sum phrased without ever adding currencies together: the
+    bare total when everything is one currency, a per-currency list
+    when it is not."""
+    totals: dict[str, object] = {}
+    for amount, currency in amounts:
+        totals[currency] = totals.get(currency, ZERO) + amount
+    if len(totals) <= 1:
+        return str(next(iter(totals.values()), ZERO))
+    return ", ".join(f"{total} {ccy}" for ccy, total in sorted(totals.items()))
+
+
 def today_view(store: Store, day: date, policy: PolicyConfig) -> dict:
     """The day-open checklist for `day`, computed from the books."""
     lines = store.bank_lines(on=day)
-    bank_total = sum((l.amount for l in lines), ZERO)
+    bank_total = _amounts_by_currency((l.amount, l.currency) for l in lines)
 
     steps: list[dict] = []
 
@@ -68,7 +80,7 @@ def today_view(store: Store, day: date, policy: PolicyConfig) -> dict:
             "exceptions"))
     else:
         oldest = min(open_exceptions, key=lambda e: (e.first_seen, e.exception_id))
-        total = sum((e.amount for e in open_exceptions), ZERO)
+        total = _amounts_by_currency((e.amount, e.currency) for e in open_exceptions)
         steps.append(_step(
             "exceptions", "Exceptions open", "pending",
             f"{len(open_exceptions)} open, {total} at issue; the oldest is "

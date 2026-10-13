@@ -589,3 +589,130 @@ def build_october_dataset() -> OctoberDataset:
                           non_premium_gold={"BL-116": "INTEREST",
                                             "BL-117": "OWN_TRANSFER",
                                             "BL-118": "BANK_FEE"})
+
+
+# ---------------------------------------------------------------------------
+# November: a second currency on the books.
+#
+# November brings Meridian Continental Brokers, a broker whose book
+# Northgate bills in EUR (with one USD policy alongside, because a
+# broker's book is mixed in the real world even when its remittances
+# follow each policy's currency). The placements are the proofs of
+# the currency rules:
+#
+# - BL-201: an EUR exact match — the tiers work in EUR exactly as in
+#   USD, and the allocation records its conversion at the rate in
+#   force on the day (1.08).
+# - BL-202 + BL-203: an EUR installment plan settled by netting on
+#   either side of the governed FX change (1.08 to 1.10 on Nov 16).
+#   The netting is in EUR on both days; only the recorded
+#   conversions differ, each at its own date's rate. BL-202 is then
+#   RETURNED on Nov 17 — after the rate moved — and re-sent as
+#   BL-207 on Nov 18: the reversal replays the recorded conversion
+#   (9,000.00 at 1.08), never the new rate, while the re-send is new
+#   cash and converts at its own date's rate (1.10).
+# - BL-204: an EUR wire citing Meridian's USD policy. The policy is
+#   real; the currencies are not interchangeable. CURRENCY_NO_OPEN_ITEMS.
+# - BL-205: the mirror image and the lookalike — a USD wire citing
+#   the EUR installment plan, for exactly the installments' net due
+#   (9,000.00). Numerically it would settle the EUR item to the
+#   cent; it must not touch it. CURRENCY_NO_OPEN_ITEMS, and the
+#   EUR installment stands open until BL-203 settles it in EUR.
+# - BL-206: the USD policy settled properly, in USD, at netting.
+#
+# Dates are spaced so the duplicate fingerprint (same payer, amount,
+# currency, within five days) separates the genuine re-send
+# (BL-207, five days after BL-202, whose fingerprint the return
+# frees) from the installment plan's second, distinct payment
+# (BL-203, seven days after BL-207).
+@dataclass
+class NovemberDataset:
+    brokers: list[Broker]                       # brokers first booked in November
+    new_receivables: list[Receivable]           # policies first booked in November
+    renewals: dict[str, dict]                   # none in November; the shape is October's
+    bank_lines: list[BankLine]
+    gold: dict[str, GoldOutcome]
+
+
+def _nov_policy(number: str, insured: str, broker_id: str | None, premium: Decimal,
+                count: int, currency: str) -> Receivable:
+    per = cents(premium / count)
+    installments = [
+        Installment(installment_id=f"{number}-I{n}", policy_number=number,
+                    sequence=n, due_date=date(2026, 11, 1) if n == 1 else date(2026, 12, 1),
+                    amount_due=per, currency=currency)
+        for n in range(1, count + 1)
+    ]
+    return Receivable(
+        policy_number=number, insured_name=insured, broker_id=broker_id,
+        status=PolicyStatus.ACTIVE, currency=currency, installments=installments,
+        term_start=date(2026, 11, 1), term_end=date(2027, 11, 1),
+    )
+
+
+def build_november_dataset() -> NovemberDataset:
+    meridian = Broker(broker_id="BRK-MERIDIAN", name="Meridian Continental Brokers",
+                      commission_rate=D("0.10"))
+    new_receivables = [
+        _nov_policy("NSP-1055", "Adriatic Ceramics Srl", "BRK-MERIDIAN",
+                    D("12000.00"), 1, "EUR"),
+        _nov_policy("NSP-1056", "Baltic Timber Mills OU", "BRK-MERIDIAN",
+                    D("20000.00"), 2, "EUR"),
+        _nov_policy("NSP-1057", "Cascadia Paper Products", "BRK-MERIDIAN",
+                    D("8000.00"), 1, "USD"),
+    ]
+    mer = "Meridian Continental Brokers"
+    bank_lines = [
+        # Nov 3 — an EUR premium paid gross, in full: exact in EUR.
+        BankLine(bank_line_id="BL-201", value_date=date(2026, 11, 3), amount=D("12000.00"),
+                 payer_name=mer, reference="NSP-1055", narrative="premium in full",
+                 source="dataset", currency="EUR"),
+        # Nov 12 — an EUR wire citing the broker's USD policy. The
+        # policy is real and open; the currencies do not mix.
+        BankLine(bank_line_id="BL-204", value_date=date(2026, 11, 12), amount=D("4500.00"),
+                 payer_name=mer, reference="NSP-1057", narrative="premium payment",
+                 source="dataset", currency="EUR"),
+        # Nov 13 — the installment plan's first installment, netted
+        # in EUR at Meridian's 10%: 10,000 × 0.9. Converts at the
+        # 1.08 in force today. (Returned Nov 17; see BL-207.)
+        BankLine(bank_line_id="BL-202", value_date=date(2026, 11, 13), amount=D("9000.00"),
+                 payer_name=mer, reference="NSP-1056", narrative="installment 1 of 2",
+                 source="dataset", currency="EUR"),
+        # Nov 14 — the lookalike: USD cash citing the EUR plan, for
+        # exactly the installments' net due. It settles nothing.
+        BankLine(bank_line_id="BL-205", value_date=date(2026, 11, 14), amount=D("9000.00"),
+                 payer_name=mer, reference="NSP-1056", narrative="installment payment",
+                 source="dataset", currency="USD"),
+        # Nov 18 — the re-send of BL-202, returned by the bank on
+        # Nov 17. New cash: it converts at today's 1.10, while the
+        # reversal of BL-202 stands at its recorded 1.08.
+        BankLine(bank_line_id="BL-207", value_date=date(2026, 11, 18), amount=D("9000.00"),
+                 payer_name=mer, reference="NSP-1056", narrative="re-sent payment — installment 1 of 2",
+                 source="dataset", currency="EUR"),
+        # Nov 25 — the plan's second installment, netted in EUR,
+        # converting at the new 1.10.
+        BankLine(bank_line_id="BL-203", value_date=date(2026, 11, 25), amount=D("9000.00"),
+                 payer_name=mer, reference="NSP-1056", narrative="installment 2 of 2",
+                 source="dataset", currency="EUR"),
+        # Nov 27 — the broker's USD policy, settled in USD at
+        # netting: 8,000 × 0.9.
+        BankLine(bank_line_id="BL-206", value_date=date(2026, 11, 27), amount=D("7200.00"),
+                 payer_name=mer, reference="NSP-1057", narrative="premium net of commission",
+                 source="dataset", currency="USD"),
+    ]
+    gold = {
+        "BL-201": GoldOutcome(tier="T1_EXACT", allocations={"NSP-1055": "12000.00"}),
+        "BL-204": GoldOutcome(exceptions=["CURRENCY_NO_OPEN_ITEMS"], suspense="4500.00"),
+        "BL-202": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1056": "9000.00"}),
+        "BL-205": GoldOutcome(exceptions=["CURRENCY_NO_OPEN_ITEMS"], suspense="9000.00"),
+        # BL-207's gold is its outcome in the November flow, where
+        # BL-202's return (Nov 17) has freed the fingerprint: the
+        # re-send links to the returned line and settles the same
+        # installment again on its own merits.
+        "BL-207": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1056": "9000.00"}),
+        "BL-203": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1056": "9000.00"}),
+        "BL-206": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1057": "7200.00"}),
+    }
+    bank_lines.sort(key=lambda b: (b.value_date, b.bank_line_id))
+    return NovemberDataset(brokers=[meridian], new_receivables=new_receivables,
+                           renewals={}, bank_lines=bank_lines, gold=gold)

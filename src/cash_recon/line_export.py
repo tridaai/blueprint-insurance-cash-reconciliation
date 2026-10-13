@@ -135,6 +135,16 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
                     "policy_number": a.policy_number,
                     "installment_id": a.installment_id,
                     "amount": as_str(a.amount),
+                    "currency": a.currency,
+                    # The recorded conversion, all three figures:
+                    # the cash amount above (in `currency`), the
+                    # governed rate used, and the functional amount
+                    # it produced. Null for functional-currency
+                    # allocations, where the amount is the figure.
+                    "fx_rate": str(a.fx_rate) if a.fx_rate is not None else None,
+                    "functional_amount": (
+                        as_str(a.functional_amount)
+                        if a.functional_amount is not None else None),
                     "tier": a.tier.value if a.tier else None,
                     "basis": _basis(a),
                     "proposal_kind": entry.proposal_kind,

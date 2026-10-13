@@ -7,7 +7,11 @@ combination pack — as a named controller the way the desk would,
 then scores every planted case against evals/golden.jsonl — gold by
 construction, committed to the repo so the gate grades the pipeline
 against a fixed record, not against the dataset builder's current
-mood. September's close pack is snapshotted before October is
+mood. November — a second currency on the books — runs as a
+scenario in its own store (its EUR broker, the governed FX change,
+a returned EUR wire re-sent after the move, and the cross-currency
+wires that must settle nothing), so the trend watch on the main
+books keeps comparing September and October. September's close pack is snapshotted before October is
 ingested, so the continuity control (October's opening == September's
 closing) grades two independently assembled packs. October also
 carries the planted proofs for the combination pass (two bills
@@ -35,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cash_recon.config import Policy as PolicyConfig  # noqa: E402
-from cash_recon.dataset import build_dataset, build_october_dataset  # noqa: E402
+from cash_recon.dataset import build_dataset, build_november_dataset, build_october_dataset  # noqa: E402
 from cash_recon.gate import approve_pack  # noqa: E402
 from cash_recon.llm import OfflineReader  # noqa: E402
 from cash_recon.models import (  # noqa: E402
@@ -47,7 +51,12 @@ from cash_recon.models import (  # noqa: E402
     Remittance,
 )
 from cash_recon.objects import InMemoryObjectStore  # noqa: E402
-from cash_recon.pipeline import ingest_dataset, ingest_october_dataset, run_day  # noqa: E402
+from cash_recon.pipeline import (  # noqa: E402
+    ingest_dataset,
+    ingest_november_dataset,
+    ingest_october_dataset,
+    run_day,
+)
 from cash_recon.rematch import rematch_suspense  # noqa: E402
 from cash_recon.report import broker_scorecard, day_report, suspense_aging  # noqa: E402
 from cash_recon.store import InMemoryStore  # noqa: E402
@@ -55,6 +64,89 @@ from cash_recon.store import InMemoryStore  # noqa: E402
 GOLDEN = Path(__file__).parent / "golden.jsonl"
 CONTROLLER = "Priya Nair"
 ASSEMBLER = "cash-team"
+
+
+def _november_expect() -> dict:
+    """The November case's expectations: the dataset's per-line gold
+    (flattened), plus the figures the currency design pins — the
+    recorded conversion on each settled line (amount, the governed
+    rate in force on the line's own value date, the functional
+    amount), the return reversing at the ORIGINAL rate after the
+    mid-month move, the per-currency close rolls, and the month-end
+    translations. Every figure is computable by hand from the
+    dataset and the governed FX table (EUR 1.08 through Nov 15,
+    1.10 from Nov 16)."""
+    november = build_november_dataset()
+    expect: dict = {}
+    for bid, gold in sorted(november.gold.items()):
+        expect[f"{bid}_tier"] = gold.tier
+        expect[f"{bid}_exceptions"] = sorted(gold.exceptions)
+        expect[f"{bid}_allocations"] = dict(sorted(gold.allocations.items()))
+        expect[f"{bid}_suspense"] = gold.suspense
+    expect.update({
+        # Recorded conversions, each at its own date's rate: the
+        # two netting lines straddle the FX change and convert
+        # differently for identical EUR cash.
+        "BL-201_fx_rate": "1.08", "BL-201_functional": "12960.00",
+        "BL-202_fx_rate": "1.08", "BL-202_functional": "9720.00",
+        "BL-207_fx_rate": "1.10", "BL-207_functional": "9900.00",
+        "BL-203_fx_rate": "1.10", "BL-203_functional": "9900.00",
+        # The re-send links to the returned line; the return was
+        # recorded Nov 17, after the rate moved, and reversed the
+        # installment in EUR — BL-202's allocation above still
+        # stands at its recorded 1.08 (history is not re-priced),
+        # and the balance it re-opened is the full billed
+        # installment.
+        "BL-207_resend_of": "BL-202",
+        "return_amount": "9000.00", "return_currency": "EUR",
+        "i1_reopened_after_return": "10000.00",
+        "i1_status_after_return": "open",
+        # Final states: everything Meridian owed is settled, each
+        # item in the currency it was billed in.
+        "nsp1055_open": "0.00", "nsp1056_open": "0.00", "nsp1057_open": "0.00",
+        "nsp1056_i1_applied": "10000.00", "nsp1056_i2_applied": "10000.00",
+        # Day reports: the per-currency section and the functional
+        # translation, with the day's rates named.
+        "nov13_eur_bank": "9000.00", "nov13_eur_allocated": "9000.00",
+        "nov13_functional_bank": "9720.00", "nov13_functional_allocated": "9720.00",
+        "nov13_rates_used": {"EUR": "1.08"}, "nov13_footing_ok": True,
+        "nov14_usd_suspense": "9000.00",
+        "nov14_exception_code": "CURRENCY_NO_OPEN_ITEMS",
+        "nov14_exception_currency": "USD",
+        # The November close: the suspense identity per currency.
+        # The USD opening is October's closing (continuity); the
+        # only USD suspense received in November is the lookalike
+        # wire; the EUR ledger opens at zero and holds BL-204.
+        "usd_opening": "85077.74", "usd_received": "9000.00",
+        "usd_applied": "0.00", "usd_returned": "0.00",
+        "usd_closing": "94077.74", "usd_footed": True,
+        "eur_opening": "0.00", "eur_received": "4500.00",
+        "eur_applied": "0.00", "eur_returned": "0.00",
+        "eur_closing": "4500.00", "eur_footed": True,
+        "headline_opening": "85077.74", "headline_closing": "94077.74",
+        "close_footed": True,
+        "cash_by_currency": {"EUR": "43500.00", "USD": "16200.00"},
+        "month_end_rates": {"EUR": "1.10"},
+        "closing_translated": {"EUR": "4950.00", "USD": "94077.74"},
+        "functional_total": "99027.74",
+        "returns_in_month_count": 1,
+        "returns_by_currency": {"EUR": "9000.00"},
+        "close_digest_stable": True,
+        # Trends keep the month's money per currency. (Exception
+        # value is pinned for EUR only: November's USD exceptions
+        # also carry the STALE_SUSPENSE flags the aging pass raises
+        # that month on older USD items — correct, but a figure of
+        # the whole book's history, not of November's business.)
+        "trend_bank_by_currency": {"EUR": "43500.00", "USD": "16200.00"},
+        "trend_allocated_by_currency": {"EUR": "39000.00", "USD": "7200.00"},
+        "trend_exception_eur": "4500.00",
+        # The scorecard shows Meridian's two denominations apart.
+        "meridian_eur_bank": "43500.00", "meridian_eur_allocated": "39000.00",
+        "meridian_eur_suspense": "4500.00",
+        "meridian_usd_bank": "16200.00", "meridian_usd_allocated": "7200.00",
+        "meridian_usd_suspense": "9000.00",
+    })
+    return expect
 
 
 def golden_rows() -> list[dict]:
@@ -178,6 +270,10 @@ def golden_rows() -> list[dict]:
             "dec_closing_payables": "0.00",
             "dec_payable_ledger_footed": True,
         },
+    })
+    rows.append({
+        "case": "NOVEMBER-MULTICURRENCY", "kind": "november",
+        "expect": _november_expect(),
     })
     rows.append({"case": "CONTROL-FOOTING", "kind": "control", "expect": "every day report foots"})
     rows.append({"case": "CONTROL-AGING", "kind": "control", "expect": "seed suspense ages into 31–60 and 60+ buckets"})
@@ -420,6 +516,147 @@ def combinations_observed(store) -> dict:
         "nsp1052_open": str(store.receivable("NSP-1052").open_balance),
         "nsp1053_open": str(store.receivable("NSP-1053").open_balance),
     }
+
+
+def november_scenario() -> dict:
+    """November on its own books — September and October run first,
+    so the close has its continuity — in a store of its own: a
+    broker billing in EUR, a governed FX change mid-month, an EUR
+    wire returned after the move and re-sent, and the two
+    cross-currency wires that must settle nothing. Its own store
+    because the trend watch on the main books compares September
+    and October, and stays that way."""
+    from cash_recon.close_pack import close_pack_export
+    from cash_recon.config import WatchPolicy
+    from cash_recon.returns import record_return
+    from cash_recon.trends import match_quality
+
+    ds = build_dataset()
+    store, objects = InMemoryStore(), InMemoryObjectStore()
+    ingest_dataset(store, objects, ds)
+    reader, policy = OfflineReader(), PolicyConfig()
+    nov_outcomes: dict[str, dict] = {}
+    nov_reports: dict[str, dict] = {}
+
+    def run_approve(day, collect=False):
+        result = run_day(store, objects, reader, policy, day, actor=ASSEMBLER)
+        if result["pack_id"]:
+            approve_pack(store, result["pack_id"], CONTROLLER, policy)
+        if result.get("non_premium_pack_id"):
+            approve_pack(store, result["non_premium_pack_id"], CONTROLLER, policy)
+        if result.get("combination_pack_id"):
+            approve_pack(store, result["combination_pack_id"], CONTROLLER, policy)
+        if collect:
+            for raw in result["outcomes"]:
+                nov_outcomes[raw["bank_line_id"]] = raw
+            nov_reports[day.isoformat()] = result["report"]
+        return result
+
+    september_days = sorted(
+        {l.value_date for l in ds.bank_lines if l.value_date >= date(2026, 9, 1)}
+        | {r.received_date for r in ds.remittances}
+    )
+    for day in september_days:
+        run_approve(day)
+    october = build_october_dataset()
+    ingest_october_dataset(store, objects, october)
+    for day in sorted({l.value_date for l in october.bank_lines}):
+        run_approve(day)
+
+    november = build_november_dataset()
+    ingest_november_dataset(store, objects, november)
+    for day in (date(2026, 11, 3), date(2026, 11, 12),
+                date(2026, 11, 13), date(2026, 11, 14)):
+        run_approve(day, collect=True)
+    # The bank takes BL-202 back on Nov 17 — after the governed rate
+    # moved on Nov 16. The state is captured here, mid-flow: the
+    # installment the reversal re-opened, in EUR.
+    ret = record_return(store, "BL-202", "NSF", CONTROLLER, date(2026, 11, 17))
+    i1_after_return = store.receivable("NSP-1056").installments[0]
+    for day in (date(2026, 11, 18), date(2026, 11, 25), date(2026, 11, 27)):
+        run_approve(day, collect=True)
+
+    observed: dict = {}
+    for bid in november.gold:
+        raw = nov_outcomes[bid]
+        agg: dict[str, float] = defaultdict(float)
+        for a in raw["allocations"]:
+            agg[a["policy_number"]] += float(a["amount"])
+        observed[f"{bid}_tier"] = raw["tier"]
+        observed[f"{bid}_exceptions"] = sorted(e["code"] for e in raw["exceptions"])
+        observed[f"{bid}_allocations"] = {
+            k: f"{v:.2f}" for k, v in sorted(agg.items())}
+        observed[f"{bid}_suspense"] = f"{float(raw['suspense_amount']):.2f}"
+    for bid in ("BL-201", "BL-202", "BL-207", "BL-203"):
+        alloc = store.allocations(bid)[0]
+        observed[f"{bid}_fx_rate"] = str(alloc.fx_rate)
+        observed[f"{bid}_functional"] = str(alloc.functional_amount)
+    observed["BL-207_resend_of"] = next(
+        l for l in store.bank_lines() if l.bank_line_id == "BL-207").resend_of
+    observed["return_amount"] = str(ret.amount)
+    observed["return_currency"] = ret.currency
+    observed["i1_reopened_after_return"] = str(i1_after_return.open_balance)
+    observed["i1_status_after_return"] = i1_after_return.status.value
+    rec1056 = store.receivable("NSP-1056")
+    observed["nsp1055_open"] = str(store.receivable("NSP-1055").open_balance)
+    observed["nsp1056_open"] = str(rec1056.open_balance)
+    observed["nsp1057_open"] = str(store.receivable("NSP-1057").open_balance)
+    observed["nsp1056_i1_applied"] = str(rec1056.installments[0].amount_applied)
+    observed["nsp1056_i2_applied"] = str(rec1056.installments[1].amount_applied)
+
+    rep13 = nov_reports["2026-11-13"]
+    observed["nov13_eur_bank"] = rep13["currencies"]["EUR"]["bank"]
+    observed["nov13_eur_allocated"] = rep13["currencies"]["EUR"]["allocated"]
+    observed["nov13_functional_bank"] = rep13["functional"]["bank_total"]
+    observed["nov13_functional_allocated"] = rep13["functional"]["allocated_total"]
+    observed["nov13_rates_used"] = rep13["functional"]["rates_used"]
+    observed["nov13_footing_ok"] = rep13["footing_ok"]
+    rep14 = nov_reports["2026-11-14"]
+    observed["nov14_usd_suspense"] = rep14["currencies"]["USD"]["suspense"]
+    observed["nov14_exception_code"] = rep14["exceptions"][0]["code"]
+    observed["nov14_exception_currency"] = rep14["exceptions"][0]["currency"]
+
+    export = close_pack_export(store, 2026, 11)
+    export_again = close_pack_export(store, 2026, 11)
+    roll = export["pack"]["control_roll"]
+    usd, eur = roll["by_currency"]["USD"], roll["by_currency"]["EUR"]
+    observed.update({
+        "usd_opening": usd["opening_suspense"],
+        "usd_received": usd["received_into_suspense"],
+        "usd_applied": usd["applied_from_suspense"],
+        "usd_returned": usd["returned_from_suspense"],
+        "usd_closing": usd["closing_suspense"], "usd_footed": usd["footed"],
+        "eur_opening": eur["opening_suspense"],
+        "eur_received": eur["received_into_suspense"],
+        "eur_applied": eur["applied_from_suspense"],
+        "eur_returned": eur["returned_from_suspense"],
+        "eur_closing": eur["closing_suspense"], "eur_footed": eur["footed"],
+        "headline_opening": roll["opening_suspense"],
+        "headline_closing": roll["closing_suspense"],
+        "close_footed": roll["footed"],
+        "cash_by_currency": roll["cash_received_in_month_by_currency"],
+        "month_end_rates": export["pack"]["functional"]["month_end_rates"],
+        "closing_translated": export["pack"]["functional"]["closing_suspense_translated"],
+        "functional_total": export["pack"]["functional"]["closing_suspense_functional_total"],
+        "returns_in_month_count": roll["returns_in_month"]["count"],
+        "returns_by_currency": roll["returns_in_month"]["totals_by_currency"],
+        "close_digest_stable": export["sha256"] == export_again["sha256"],
+    })
+    trend = match_quality(store, WatchPolicy())
+    nov = next(m for m in trend["months"] if m["month"] == "2026-11")
+    observed["trend_bank_by_currency"] = nov["bank_value_by_currency"]
+    observed["trend_allocated_by_currency"] = nov["allocated_value_by_currency"]
+    observed["trend_exception_eur"] = nov["exception_value_by_currency"].get("EUR")
+    card = {r["broker_id"]: r for r in broker_scorecard(
+        store, date(2026, 11, 30), month=(2026, 11))}
+    mer = card["BRK-MERIDIAN"]["by_currency"]
+    observed["meridian_eur_bank"] = mer["EUR"]["bank_total"]
+    observed["meridian_eur_allocated"] = mer["EUR"]["allocated_total"]
+    observed["meridian_eur_suspense"] = mer["EUR"]["suspense_total"]
+    observed["meridian_usd_bank"] = mer["USD"]["bank_total"]
+    observed["meridian_usd_allocated"] = mer["USD"]["allocated_total"]
+    observed["meridian_usd_suspense"] = mer["USD"]["suspense_total"]
+    return observed
 
 
 def rematch_scenarios() -> dict[str, dict]:
@@ -976,6 +1213,17 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 )
                 if not flagged:
                     problems.append("near-duplicate was not flagged")
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "november":
+            observed = november_scenario()
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
             if problems:
                 failures.append(f"{case}: " + "; ".join(problems))
             else:

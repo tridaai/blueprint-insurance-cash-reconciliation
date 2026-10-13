@@ -183,6 +183,7 @@ def non_premium_ledger(
                 "bank_line_id": np.bank_line_id,
                 "kind": np.kind,
                 "amount": as_str(np.amount),
+                "currency": np.currency,
                 "payer_name": np.payer_name,
                 "pack_id": pack.pack_id,
                 "status": status,

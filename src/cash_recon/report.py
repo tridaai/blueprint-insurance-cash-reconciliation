@@ -6,6 +6,13 @@ says so in words and refuses to call the day reconciled. Exceptions
 are listed, never netted away; suspense is aged in buckets with the
 oldest items named, because aged unapplied cash is what auditors ask
 about first.
+
+The footing runs PER CURRENCY. A day that takes both USD and EUR cash
+foots in USD and in EUR separately — no figure in the report adds one
+currency to another — and the report also carries a functional (USD)
+translation of the day, at the governed rates in force on each line's
+value date, labelled as what it is: a reporting conversion, not a
+posting and not the control.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ from datetime import date
 from decimal import Decimal
 
 from .config import Policy as PolicyConfig
+from .fx import FUNCTIONAL_CURRENCY, rate_on, to_functional
 from .models import ExceptionCode, Tier
 from .money import ZERO, cents
 from .store import Store
@@ -41,6 +49,7 @@ def non_premium_view(store: Store, day: date) -> dict:
                     "bank_line_id": np.bank_line_id,
                     "kind": np.kind,
                     "amount": str(np.amount),
+                    "currency": np.currency,
                     "payer_name": np.payer_name,
                     "pack_id": pack.pack_id,
                     "status": pack.status.value,
@@ -68,6 +77,7 @@ def combination_settlements(store: Store, day: date) -> dict:
                     "combination_id": entry.combination_id,
                     "policy_number": entry.allocation.policy_number,
                     "installment_id": entry.allocation.installment_id,
+                    "currency": entry.allocation.currency,
                     "pack_id": pack.pack_id,
                     "status": pack.status.value,
                     "legs": [],
@@ -110,7 +120,12 @@ def rematch_recoveries(store: Store, day: date) -> dict:
 
 
 def suspense_aging(store: Store, as_of: date) -> list[dict]:
-    """All unapplied cash, bucketed by age, oldest named in each."""
+    """All unapplied cash, bucketed by age, oldest named in each.
+
+    Amounts are never added across currencies: every item names its
+    own denomination, and each bucket carries its totals per
+    currency beside the headline figure (which, on a
+    single-currency book, is simply that currency's total)."""
     items = [i for i in store.suspense_items() if i.status == "open"]
     out = []
     for low, high, label in BUCKETS:
@@ -119,16 +134,23 @@ def suspense_aging(store: Store, as_of: date) -> list[dict]:
             if i.age_days(as_of) >= low and (high is None or i.age_days(as_of) <= high)
         ]
         members.sort(key=lambda i: i.received_date)
+        by_currency: dict[str, Decimal] = {}
+        for i in members:
+            by_currency[i.currency] = by_currency.get(i.currency, ZERO) + i.amount
         out.append(
             {
                 "bucket": label,
                 "total": str(sum((i.amount for i in members), ZERO)),
+                "totals_by_currency": {
+                    ccy: str(total) for ccy, total in sorted(by_currency.items())
+                },
                 "count": len(members),
                 "items": [
                     {
                         "suspense_id": i.suspense_id,
                         "bank_line_id": i.bank_line_id,
                         "amount": str(i.amount),
+                        "currency": i.currency,
                         "received_date": i.received_date.isoformat(),
                         "age_days": i.age_days(as_of),
                         "reason": i.reason,
@@ -146,15 +168,22 @@ def returns_view(store: Store, on: date | None = None) -> dict:
     recorded that day — the reversing entries belonging to that day's
     report. Without it, every return on the books."""
     rets = store.returns(on=on)
+    totals_by_currency: dict[str, Decimal] = {}
+    for r in rets:
+        totals_by_currency[r.currency] = totals_by_currency.get(r.currency, ZERO) + r.amount
     return {
         "count": len(rets),
         "total": str(sum((r.amount for r in rets), ZERO)),
+        "totals_by_currency": {
+            ccy: str(total) for ccy, total in sorted(totals_by_currency.items())
+        },
         "items": [
             {
                 "return_id": r.return_id,
                 "bank_line_id": r.bank_line_id,
                 "reason": r.reason.value,
                 "amount": str(r.amount),
+                "currency": r.currency,
                 "return_date": r.return_date.isoformat(),
                 "recorded_by": r.recorded_by,
                 "pack_ids": list(r.pack_ids),
@@ -265,6 +294,8 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
 
     # Per-broker view: a line belongs to the broker who sent it (or the
     # broker on the policy it references), else to the direct book.
+    # Each broker's figures are also kept per currency — a broker's
+    # EUR bank total is never added to its USD one.
     brokers = {b.broker_id: b.name for b in store.brokers()}
     by_broker: dict[str, dict] = {}
     alloc_by_line: dict[str, Decimal] = {}
@@ -276,23 +307,93 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
     for line in lines:
         key = _broker_key(store, line, brokers)
         bucket = by_broker.setdefault(
-            key, {"bank": ZERO, "allocated": ZERO, "netted": ZERO, "suspense": ZERO}
+            key, {"bank": ZERO, "allocated": ZERO, "netted": ZERO, "suspense": ZERO,
+                  "currencies": {}}
         )
         bucket["bank"] += line.amount
         bucket["allocated"] += alloc_by_line.get(line.bank_line_id, ZERO)
         bucket["netted"] += netted_by_line.get(line.bank_line_id, ZERO)
         bucket["suspense"] += susp_by_line.get(line.bank_line_id, ZERO)
+        cbucket = bucket["currencies"].setdefault(
+            line.currency,
+            {"bank": ZERO, "allocated": ZERO, "netted": ZERO, "suspense": ZERO})
+        cbucket["bank"] += line.amount
+        cbucket["allocated"] += alloc_by_line.get(line.bank_line_id, ZERO)
+        cbucket["netted"] += netted_by_line.get(line.bank_line_id, ZERO)
+        cbucket["suspense"] += susp_by_line.get(line.bank_line_id, ZERO)
 
     non_premium = non_premium_view(store, day)
     non_premium_total = Decimal(non_premium["total"])
-    # Lines a combination proposal settled (or holds) still belong
-    # to their own days' footing through the ordinary terms: their
-    # allocations count in allocated_total once the combination
-    # pass has saved them, and their suspense items are held
-    # resolved from proposal, so the identity needs no extra term.
-    footing_ok = (
+    # The footing runs per currency. Each currency's bank total must
+    # equal its own applied + netted + suspense + non-premium, in
+    # that currency; the day foots when every currency present
+    # foots. On a single-currency day this is exactly the identity
+    # the report has always run.
+    currencies: dict[str, dict] = {}
+    for line in lines:
+        currencies.setdefault(line.currency, {
+            "bank": ZERO, "allocated": ZERO, "posted": ZERO,
+            "netted": ZERO, "suspense": ZERO, "non_premium": ZERO,
+        })
+    line_ccy = {l.bank_line_id: l.currency for l in lines}
+    for a in allocations:
+        currencies[a.currency]["allocated"] += a.amount
+    for pack in packs:
+        if pack.status.value != "approved":
+            continue
+        for entry in pack.entries:
+            if entry.allocation and entry.allocation.bank_line_id in line_ids:
+                currencies[entry.allocation.currency]["posted"] += entry.allocation.amount
+    for lid, amount in netted_by_line.items():
+        currencies[line_ccy[lid]]["netted"] += amount
+    for i in suspense_today:
+        currencies[i.currency]["suspense"] += i.amount
+    for item in non_premium["items"]:
+        currencies.setdefault(item["currency"], {
+            "bank": ZERO, "allocated": ZERO, "posted": ZERO,
+            "netted": ZERO, "suspense": ZERO, "non_premium": ZERO,
+        })
+        currencies[item["currency"]]["non_premium"] += Decimal(item["amount"])
+    for ccy, slot in currencies.items():
+        slot["bank"] = sum(
+            (l.amount for l in lines if l.currency == ccy), ZERO)
+        slot["footing_ok"] = (
+            slot["bank"]
+            == slot["allocated"] + slot["netted"] + slot["suspense"] + slot["non_premium"]
+        )
+    footing_ok = all(slot["footing_ok"] for slot in currencies.values()) if currencies else (
         bank_total == allocated_total + netted_total + suspense_total + non_premium_total
     )
+    # The day's functional translation: every figure converted at
+    # the governed rate in force on its line's value date (the day
+    # itself, for a day report). Allocations convert at the figures
+    # recorded on them when they were created. A translation for
+    # presentation — never the control, never a posting.
+    functional = {
+        "currency": FUNCTIONAL_CURRENCY,
+        "bank_total": str(sum(
+            (to_functional(l.amount, l.currency, l.value_date) for l in lines), ZERO)),
+        "allocated_total": str(sum(
+            (
+                a.functional_amount if a.functional_amount is not None
+                else a.amount if a.currency == FUNCTIONAL_CURRENCY
+                else to_functional(a.amount, a.currency, day)
+                for a in allocations
+            ), ZERO)),
+        "suspense_total": str(sum(
+            (to_functional(i.amount, i.currency, i.received_date) for i in suspense_today),
+            ZERO)),
+        "rates_used": {
+            ccy: str(rate_on(ccy, day))
+            for ccy in sorted(currencies) if ccy != FUNCTIONAL_CURRENCY
+        },
+        "note": (
+            f"Functional ({FUNCTIONAL_CURRENCY}) figures are translations at the "
+            "governed rates in force on each line's value date — a reporting "
+            "conversion, not postings. The day's control is the per-currency "
+            "footing above."
+        ),
+    }
     stale = [
         i for i in store.suspense_items()
         if i.status == "open" and i.age_days(day) > policy.stale_suspense_days
@@ -304,19 +405,8 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
     returned_for_lines = sum(
         (r.amount for r in store.returns() if r.bank_line_id in line_ids), ZERO
     )
-    return {
-        "date": day.isoformat(),
-        "bank_total": str(bank_total),
-        "allocated_total": str(allocated_total),
-        "returned_total": str(returned_for_lines),
-        "allocated_net_of_returns": str(allocated_total - returned_for_lines),
-        "posted_total": str(posted_total),
-        "suspense_total": str(suspense_total),
-        "returns_recorded": returns_view(store, on=day),
-        "bank_lines": len(lines),
-        "footing_ok": footing_ok,
-        "reconciled": footing_ok,
-        "footing_note": (
+    if len(currencies) <= 1:
+        footing_note = (
             (
                 "Bank total equals applied"
                 + (" plus cash netted against return-premium payables"
@@ -330,7 +420,49 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
             else f"FOOTING FAILURE: bank {bank_total} != applied {allocated_total} "
             f"+ netted {netted_total} + suspense {suspense_total} "
             f"+ non-premium {non_premium_total}. The day is NOT reconciled."
-        ),
+        )
+    elif footing_ok:
+        footing_note = (
+            "Bank equals applied plus suspense in each currency ("
+            + ", ".join(sorted(currencies))
+            + "), to the cent: the footing runs per currency and no figure "
+            f"crosses denominations. The functional ({FUNCTIONAL_CURRENCY}) "
+            "totals are translations at the governed rates listed, not postings."
+        )
+    else:
+        failures = "; ".join(
+            f"{ccy}: bank {slot['bank']} != applied {slot['allocated']} "
+            f"+ netted {slot['netted']} + suspense {slot['suspense']} "
+            f"+ non-premium {slot['non_premium']}"
+            for ccy, slot in sorted(currencies.items()) if not slot["footing_ok"]
+        )
+        footing_note = f"FOOTING FAILURE: {failures}. The day is NOT reconciled."
+    return {
+        "date": day.isoformat(),
+        "bank_total": str(bank_total),
+        "allocated_total": str(allocated_total),
+        "returned_total": str(returned_for_lines),
+        "allocated_net_of_returns": str(allocated_total - returned_for_lines),
+        "posted_total": str(posted_total),
+        "suspense_total": str(suspense_total),
+        "returns_recorded": returns_view(store, on=day),
+        "bank_lines": len(lines),
+        "footing_ok": footing_ok,
+        "reconciled": footing_ok,
+        "footing_note": footing_note,
+        "currencies": {
+            ccy: {
+                "bank": str(slot["bank"]),
+                "allocated": str(slot["allocated"]),
+                "posted": str(slot["posted"]),
+                "netted": str(slot["netted"]),
+                "suspense": str(slot["suspense"]),
+                "non_premium": str(slot["non_premium"]),
+                "footing_ok": slot["footing_ok"],
+            }
+            for ccy, slot in sorted(currencies.items())
+        },
+        "functional": functional,
         "netted_total": str(netted_total),
         "return_premiums": _return_premium_day_lines(store, day, netted_total),
         "exceptions": [
@@ -340,13 +472,24 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
                 "bank_line_id": e.bank_line_id,
                 "policy_number": e.policy_number,
                 "amount": str(e.amount),
+                "currency": e.currency,
                 "detail": e.detail,
                 "status": e.status,
             }
             for e in exceptions_today
         ],
         "by_broker": {
-            k: {kk: str(vv) for kk, vv in v.items()} for k, v in sorted(by_broker.items())
+            k: {
+                "bank": str(v["bank"]),
+                "allocated": str(v["allocated"]),
+                "netted": str(v["netted"]),
+                "suspense": str(v["suspense"]),
+                "currencies": {
+                    ccy: {kk: str(vv) for kk, vv in cv.items()}
+                    for ccy, cv in sorted(v["currencies"].items())
+                },
+            }
+            for k, v in sorted(by_broker.items())
         },
         "rematch_recoveries": rematch_recoveries(store, day),
         "non_premium": non_premium,
@@ -357,6 +500,7 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
                 "suspense_id": i.suspense_id,
                 "bank_line_id": i.bank_line_id,
                 "amount": str(i.amount),
+                "currency": i.currency,
                 "age_days": i.age_days(day),
             }
             for i in sorted(stale, key=lambda i: i.received_date)
@@ -552,6 +696,17 @@ def broker_scorecard(store: Store, as_of: date, month: tuple[int, int] | None = 
         avg_days = (
             str(cents(Decimal(sum(days)) / Decimal(len(days)))) if days else None
         )
+        # The same money, kept per currency: a broker whose book is
+        # billed in two currencies shows two sets of figures, never
+        # a blended total dressed as one denomination.
+        by_currency: dict[str, dict] = {}
+        for l in mine:
+            slot = by_currency.setdefault(l.currency, {
+                "bank_total": ZERO, "allocated_total": ZERO, "suspense_total": ZERO})
+            slot["bank_total"] += l.amount
+            slot["allocated_total"] += sum(
+                (a.amount for a in alloc_by_line.get(l.bank_line_id, [])), ZERO)
+            slot["suspense_total"] += open_susp_by_line.get(l.bank_line_id, ZERO)
         rows.append({
             "broker_id": bid,
             "broker": names[bid],
@@ -559,6 +714,10 @@ def broker_scorecard(store: Store, as_of: date, month: tuple[int, int] | None = 
             "bank_total": str(bank),
             "allocated_total": str(allocated),
             "suspense_total": str(suspense),
+            "by_currency": {
+                ccy: {kk: str(vv) for kk, vv in slot.items()}
+                for ccy, slot in sorted(by_currency.items())
+            },
             "settled_netting_lines": len(settled),
             "clean_netting_lines": len(clean),
             "clean_netting_rate": rate,

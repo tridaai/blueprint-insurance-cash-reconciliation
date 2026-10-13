@@ -132,25 +132,31 @@ def battery(store, tag: str = "") -> None:
     assert pack.pack_id in {p.pack_id for p in store.packs(on=date(2026, 9, 2))}
 
     # Bank lines: save upserts the record (the re-send link lands
-    # this way) while add stays insert-only.
+    # this way) while add stays insert-only. The line is EUR: the
+    # denomination round-trips on every store, payload and all.
     bl = BankLine(bank_line_id=f"BL-{tag}BATTERY", value_date=date(2026, 9, 3),
-                  amount=D("10.00"), payer_name="Battery Payer", reference=None)
+                  amount=D("10.00"), payer_name="Battery Payer", reference=None,
+                  currency="EUR")
     store.add_bank_line(bl)
     bl.resend_of = "BL-001"
     store.save_bank_line(bl)
     saved = [l for l in store.bank_lines(on=date(2026, 9, 3)) if l.bank_line_id == bl.bank_line_id]
-    assert saved and saved[0].resend_of == "BL-001"
+    assert saved and saved[0].resend_of == "BL-001" and saved[0].currency == "EUR"
 
     # Allocations: saved under a pack; a gate edit replaces the
-    # pack's rows wholesale so the index follows the pack.
+    # pack's rows wholesale so the index follows the pack. The
+    # allocation carries its recorded conversion with it.
     alloc = Allocation(bank_line_id=f"BL-{tag}ALLOC", policy_number="NSP-1001",
-                       installment_id="NSP-1001-I1", amount=D("10.00"), tier=None)
+                       installment_id="NSP-1001-I1", amount=D("10.00"), tier=None,
+                       currency="EUR", fx_rate=D("1.08"), functional_amount=D("10.80"))
     store.save_allocations([alloc], f"PACK-{tag}BATTERY")
     assert [a.amount for a in store.allocations(alloc.bank_line_id)] == [D("10.00")]
     alloc.amount = D("12.00")
     store.replace_allocations([alloc], f"PACK-{tag}BATTERY")
     mine = store.allocations(alloc.bank_line_id)
     assert len(mine) == 1 and mine[0].amount == D("12.00")
+    assert mine[0].currency == "EUR" and mine[0].fx_rate == D("1.08")
+    assert mine[0].functional_amount == D("10.80")
 
     # Payment returns: recorded, listed by date, found by line.
     ret = PaymentReturn(

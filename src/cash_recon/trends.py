@@ -97,12 +97,15 @@ def match_quality(store: Store, watch_policy: WatchPolicy | None = None) -> dict
                     auto_by_month[month] += entry.allocation.amount
 
     exc_by_month: dict[str, dict[str, dict]] = defaultdict(dict)
+    exc_value_by_month_ccy: dict[str, dict[str, Decimal]] = defaultdict(
+        lambda: defaultdict(lambda: ZERO))
     for e in store.exceptions():
         slot = exc_by_month[_of(e.first_seen)].setdefault(
             e.code.value, {"count": 0, "value": ZERO}
         )
         slot["count"] += 1
         slot["value"] += e.amount
+        exc_value_by_month_ccy[_of(e.first_seen)][e.currency] += e.amount
 
     # Suspense received uses the close pack's own reconstruction
     # (what entered suspense when each line was worked), so this
@@ -178,11 +181,38 @@ def match_quality(store: Store, watch_policy: WatchPolicy | None = None) -> dict
         month_returns = returns_by_month.get(key, [])
         returns_value = sum((r.amount for r in month_returns), ZERO)
         auto_value = auto_by_month.get(key, ZERO)
+        # The month's money, kept per currency: bank and allocated
+        # value, the auto-applied rate within each currency, and
+        # exception value. Rates and totals never blend
+        # denominations — a rate computed over mixed currencies
+        # would be a number about nothing.
+        bank_by_ccy: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        alloc_by_ccy: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        auto_by_ccy: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        for l in month_lines:
+            bank_by_ccy[l.currency] += l.amount
+            for a in alloc_by_line.get(l.bank_line_id, []):
+                alloc_by_ccy[a.currency] += a.amount
+        for pack in store.packs():
+            for entry in pack.entries:
+                if entry.allocation and entry.auto_applied:
+                    if month_of_line.get(entry.allocation.bank_line_id) == key:
+                        auto_by_ccy[entry.allocation.currency] += entry.allocation.amount
         months.append({
             "month": key,
             "bank_lines": len(month_lines),
             "bank_value": as_str(bank_value),
             "allocated_value": as_str(allocated),
+            "bank_value_by_currency": {
+                ccy: as_str(v) for ccy, v in sorted(bank_by_ccy.items())},
+            "allocated_value_by_currency": {
+                ccy: as_str(v) for ccy, v in sorted(alloc_by_ccy.items())},
+            "auto_applied_rate_by_currency": {
+                ccy: _rstr(_ratio(auto_by_ccy.get(ccy, ZERO), bank_by_ccy[ccy]))
+                for ccy in sorted(bank_by_ccy)},
+            "exception_value_by_currency": {
+                ccy: as_str(v)
+                for ccy, v in sorted(exc_value_by_month_ccy.get(key, {}).items())},
             "auto_applied_value": as_str(auto_value),
             "auto_applied_rate": _rstr(_ratio(auto_value, bank_value)),
             "tier_mix": {

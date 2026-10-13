@@ -74,6 +74,33 @@ def ingest_dataset(store: Store, objects: ObjectStore, dataset: Dataset) -> None
                                   f"{len(dataset.remittances)} remittances"))
 
 
+def ingest_november_dataset(store: Store, objects: ObjectStore, dataset) -> None:
+    """Load November on top of October's books: a broker whose book
+    is billed in a second currency, its policies (EUR and USD), and
+    its bank lines. No renewals this month; the shape is October's
+    so a month is a month, whichever slice a dataset ships."""
+    for broker in dataset.brokers:
+        store.upsert_broker(broker)
+    for rec in dataset.new_receivables:
+        store.upsert_receivable(rec)
+    for policy_number, renewal in dataset.renewals.items():
+        rec = store.receivable(policy_number)
+        if rec is None:
+            raise ValueError(f"renewal names a policy not on the books: {policy_number}")
+        have = {i.installment_id for i in rec.installments}
+        fresh = [i for i in renewal["installments"] if i.installment_id not in have]
+        if fresh:
+            rec.installments = [*rec.installments, *fresh]
+            rec.term_start = renewal["term_start"]
+            rec.term_end = renewal["term_end"]
+            store.upsert_receivable(rec)
+    for line in dataset.bank_lines:
+        store.add_bank_line(line)
+    store.audit(AuditEvent(at=_now(), actor="ingest", action="dataset_loaded", subject="northgate-november",
+                           detail=f"November: {len(dataset.new_receivables)} new policies, "
+                                  f"{len(dataset.bank_lines)} bank lines"))
+
+
 def ingest_october_dataset(store: Store, objects: ObjectStore, dataset) -> None:
     """Load October on top of September's books: the broker whose
     terms changed, the new policies, the bank lines — and the
