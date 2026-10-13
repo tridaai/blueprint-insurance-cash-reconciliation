@@ -445,6 +445,81 @@ Provider selection is `LLM_BACKEND`
 (`auto` default) plus the provider variables in `.env.example`.
 Store selection is `DATABASE_URL` (PostgreSQL) or `SQLITE_PATH`
 (SQLite file, default `data/cashrecon.db`) — an env change only.
+Checkpoint retention is policy in the same module:
+`CHECKPOINT_KEEP_PER_THREAD` (50) and `CHECKPOINT_MAX_AGE_DAYS`
+(30), with `CHECKPOINT_PRUNE_ON_STARTUP` as the opt-in startup
+hook (unset = off).
+
+## Run lifecycle: a day runs once
+
+The day-run graph writes as it goes — persist commits exceptions
+and suspense, assemble saves the pack — and its store writes are
+upserts keyed by deterministic ids, which made a repeated run
+look harmless in the counts while being destructive in the
+record: `save_pack` overwrites the pack in place, so a second run
+reverted an approved pack to proposed and erased a rejection;
+`add_exception`'s upsert reset a day's exceptions to open,
+discarding the workbench's assignee and handling notes; the day
+report, reading the allocations index, stopped footing against a
+doubled index on the store whose save appended. (All three
+behaviours were established by running a day twice against a
+scratch store and diffing the books, not by reading the code.)
+
+The guard lives in `pipeline.run_day`, on the audit trail: each
+attempt writes `day_run_started` / `day_run_completed` events
+whose subject is the day, and the day's standing is read off the
+order of that trail — complete when the last started attempt is
+followed by a completion, orphaned when a started attempt is the
+last word (counts alone misread a recovered day as interrupted
+forever, because a recovery adds its own started/completed pair
+above the orphan's started). A decided pack refuses a second run
+on the pack's own evidence, so books written before run records
+existed are guarded too; the refusal is itself an audit event and
+the run's only trace. The recovery path — the one legitimate
+second run — stamps the orphan `day_run_interrupted`, cleanses
+the dead attempt's allocation-index rows for the day's
+still-proposed packs (the index is an index of pack entries, so a
+combination pack the rerun leaves untouched has its rows
+re-derived from the pack as it stands), and carries the day's
+exceptions' handling state (status, assignee, notes) across the
+re-persist: the regenerated record's code, amount and detail
+stand, but the desk's work on the crashed attempt's queue is not
+the recovery's to undo. Attempts run on attempt-scoped checkpoint
+threads (`day-<date>-a<N>`), so no attempt ever resumes another's
+half-written graph state. Two store contracts were aligned to
+make the in-memory double tell the same truth as the SQL stores,
+and the conformance battery now pins both: suspense `add` is
+insert-only everywhere, and the allocations index is keyed by
+(bank line, installment) everywhere — a second save indexes
+nothing twice.
+
+## Checkpoint retention
+
+The checkpointer is the graph's scratch memory: a chain of state
+snapshots per run, in the saver's own tables (`checkpoints` /
+`writes` on SQLite; `checkpoints` / `checkpoint_blobs` /
+`checkpoint_writes` on Postgres). Nothing trims it — measured on
+this repository's own scratch database: 126,843 checkpoints
+across 36 threads, 825 MB, from test and demo runs. The retention
+policy (`checkpoints.py`) keeps the newest
+`checkpoint_keep_per_thread` per thread and prunes kept
+checkpoints older than `checkpoint_max_age_days`, with one
+exception that outranks both: a thread's single newest checkpoint
+is never pruned, so the latest state of every thread always still
+loads and a run can always be inspected where it stopped.
+Timestamps are read through the saver itself on SQLite (they live
+inside its serialised payloads) and from the checkpoint JSON on
+Postgres; the Postgres prune additionally garbage-collects a
+thread's blobs whose (channel, version) no surviving checkpoint
+references. The prune is an explicit operator act — a CLI
+subcommand with a `--dry-run` that counts without cutting — and
+the only automation is the opt-in startup hook, off by default
+and logged with its counts when on: deleting anything is a
+decision, and decisions here are named and on the record. The
+policy's correctness is tested where it matters: after a prune,
+every thread's newest state still loads through the saver with
+its final report intact, and a fresh day run completes against
+the pruned store.
 
 ## Combination settlements
 

@@ -657,6 +657,61 @@ audit trail as `webhook_failed` with the error class, and the
 gate act stands either way. The gate never waits on a downstream
 system being awake.
 
+## Re-runs, interruptions, and checkpoint retention
+
+A day runs once. The run guards itself on the audit trail's own
+run record (each attempt writes `day_run_started` /
+`day_run_completed` events for the day), because left unguarded a
+second run is quietly destructive: it overwrites the day's pack in
+place — an approved pack reverts to proposed on the record, a
+rejection is erased — and regenerates the day's exceptions over
+whatever the workbench has done with them. So:
+
+- A day whose pack stands **decided** (approved or rejected), or
+  which ran to completion, refuses a second run in words — an API
+  409 / a CLI exit 1 naming the pack and its status — and changes
+  nothing. The refusal itself is written to the audit trail, so the
+  double-run attempt is on the record. Cash from a rejected pack is
+  re-worked through the re-match pass, never by re-running the day.
+- The one sanctioned second run is a **recovery**: a prior attempt
+  started and never completed — the process died mid-run. The
+  recovery stamps the orphan attempt `day_run_interrupted` on the
+  trail, supersedes its partial work (its exceptions are
+  regenerated, its allocation-index rows cleansed and rewritten),
+  preserves the workbench's handling state (assignees, notes) on
+  the day's exceptions across the re-persist, and runs the day
+  fresh on its own checkpoint thread. Approval remains the only
+  applier throughout: an interrupted run has applied nothing,
+  because applying was never the run's to do, and tests prove the
+  recovered world's books are the clean single-run world's books,
+  exactly.
+
+The run's LangGraph checkpoints are the third lifecycle concern:
+every run appends a chain of them, and the saver's tables grow
+without bound — this repository's own scratch database accumulated
+**126,843 checkpoints and 193,070 pending writes (825 MB)** from
+test and demo runs alone. Checkpoints are the graph's scratch
+memory, not the books, so the tail is cut under a governed
+retention policy (`CHECKPOINT_KEEP_PER_THREAD`, default 50, and
+`CHECKPOINT_MAX_AGE_DAYS`, default 30 — a checkpoint older than
+the window goes even inside the keep count, except a thread's
+single newest, which is never pruned, so every thread's latest
+state always still loads). Pruning is an explicit operator act,
+never a silent side effect:
+
+```bash
+cash-recon checkpoints prune --dry-run   # count what would go
+cash-recon checkpoints prune             # cut to the policy window
+```
+
+A dry run against that scratch database counts 125,043 checkpoints
+and 189,998 writes beyond the window. A deployment may opt into
+one prune at API startup with `CHECKPOINT_PRUNE_ON_STARTUP=1`;
+the default is off, because deleting anything is a decision, and
+decisions here are named and on the record. On Postgres the prune
+also collects the saver's channel blobs no surviving checkpoint
+references.
+
 ## Guardrails, as code
 
 - Remittance and bank text is **untrusted**. Instruction-like text
@@ -783,7 +838,8 @@ src/cash_recon/
   trends.py      the match-quality trend watch: per-month figures, deltas, named deteriorations
   webhooks.py    gate webhooks: fire-and-forget events, one retry, failures audited
   statement.py   the bank statement importer: generic CSV in, bank lines out
-  pipeline.py    the day run as a LangGraph graph
+  pipeline.py    the day run as a LangGraph graph, behind the run-once lifecycle guard
+  checkpoints.py checkpoint retention: the governed prune of the LangGraph checkpoint store
   rematch.py     the suspense re-match pass: late information, same tiers, same gate
   store.py       Postgres (production) / SQLite (local) / in-memory (tests)
   objects.py     S3-compatible document storage
@@ -796,7 +852,7 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 192 tests,
+The blueprint is built and passing its automated gates: 211 tests,
 68/68 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
