@@ -27,7 +27,7 @@ import json
 import logging
 from datetime import date, datetime, time, timezone
 
-from . import gate, webhooks
+from . import combinations, gate, webhooks
 from .config import Policy as PolicyConfig
 from .matcher import MatchContext, match_line
 from .models import AuditEvent, ExceptionCode
@@ -251,6 +251,13 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         store.audit(AuditEvent(at=stamp, actor=actor, action="suspense_rematch_attempt",
                                subject=item.suspense_id, detail=detail))
 
+    # The combination pass closes the re-match: two items the tiers
+    # could not settle alone may settle one bill together. It reads
+    # the books as the re-match left them — items recovered above
+    # are already resolved and out of the leg population — and its
+    # proposals land in a PACK-COMB pack at the same gate.
+    comb = combinations.propose_combinations(store, actor, as_of)
+
     return {
         "as_of": as_of.isoformat(),
         "actor": actor,
@@ -260,4 +267,6 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         "partially_recovered": partial,
         "still_open": still_open,
         "pack_id": pack_id,
+        "combinations": comb["proposed"],
+        "combination_pack_id": comb["pack_id"],
     }

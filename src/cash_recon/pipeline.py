@@ -1,6 +1,6 @@
 """The day run, as a LangGraph graph.
 
-    ingest ─▶ screen ─▶ read ─▶ match ─▶ persist ─▶ assemble ─▶ sweep ─▶ report
+    ingest ─▶ screen ─▶ read ─▶ match ─▶ persist ─▶ assemble ─▶ combine ─▶ sweep ─▶ report
 
 - **screen**: remittance documents are untrusted — instruction-like
   text is fenced out before any reader sees the document, and a
@@ -8,9 +8,15 @@
 - **read**: the reader backend (a real model when configured, the
   labelled offline fallback otherwise) turns advice text into
   proposed allocations, cited to the text.
-- **match**: the tiered matcher, in code, decides every bank line.
+- **match**: bank lines that are not premium cash at all are
+  classified in code, out of the premium pipeline; the tiered
+  matcher, in code, decides every remaining bank line.
 - **persist**: exceptions, suspense items and audit events are stored.
-- **assemble**: the day's posting pack is built for the human gate.
+- **assemble**: the day's posting pack — and any non-premium
+  disposition pack — is built for the human gate.
+- **combine**: the combination pass looks for same-payer pairs in
+  suspense whose cash together settles one open installment
+  exactly, and proposes them in their own pack at the same gate.
 - **sweep**: suspense older than the configured age earns a
   STALE_SUSPENSE exception, so aging is a queue, not a surprise.
 - **report**: the daily reconciliation report, footing checked.
@@ -28,7 +34,7 @@ from typing import TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from . import documents, gate, webhooks
+from . import combinations, documents, gate, nonpremium, webhooks
 from .config import Policy as PolicyConfig
 from .dataset import Dataset
 from .llm import OfflineReader
@@ -140,7 +146,10 @@ class DayState(TypedDict, total=False):
     day: str
     actor: str
     outcomes: list[dict]
+    classified: list[dict]  # {bank_line_id, kind} — non-premium lines
     pack_id: str | None
+    non_premium_pack_id: str | None
+    combination_pack_id: str | None
     document_notes: list[str]
     report: dict
 
@@ -182,7 +191,27 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
 
     def match(state: DayState) -> DayState:
         day = date.fromisoformat(state["day"])
-        lines = sorted(store.bank_lines(on=day), key=lambda l: l.bank_line_id)
+        all_lines = sorted(store.bank_lines(on=day), key=lambda l: l.bank_line_id)
+        # Non-premium lines are classified in code before the tiers
+        # and never reach them: a fee rebate or an own-account
+        # transfer has no policy it could settle, and sending it
+        # through the matcher would only park it in suspense as if
+        # it were unexplained premium cash. The classification is
+        # recorded on the audit trail, and the lines ride a
+        # disposition pack to the same gate (see assemble).
+        lines, classified = [], []
+        for line in all_lines:
+            kind = nonpremium.classify_line(line)
+            if kind is None:
+                lines.append(line)
+                continue
+            classified.append({"bank_line_id": line.bank_line_id, "kind": kind})
+            store.audit(AuditEvent(at=_now(), actor="classifier", action="non_premium_classified",
+                                   subject=line.bank_line_id,
+                                   detail=f"Classified {kind} by the non-premium rules in "
+                                          "config: not premium cash, routed to a disposition "
+                                          "pack at the gate; never matched, never in suspense."))
+            log.info("classified %s as non-premium %s", line.bank_line_id, kind)
         settled = {
             entry.allocation.bank_line_id
             for pack in store.packs()
@@ -224,7 +253,7 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
             log.info("matched %s: tier=%s allocations=%s exceptions=%s",
                      line.bank_line_id, outcome.tier, outcome.allocated_total,
                      [e.code.value for e in outcome.exceptions])
-        return {"outcomes": serialised}
+        return {"outcomes": serialised, "classified": classified}
 
     def persist(state: DayState) -> DayState:
         from .matcher import LineOutcome
@@ -268,19 +297,36 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
         from .matcher import LineOutcome
 
         day = date.fromisoformat(state["day"])
+        result: DayState = {"pack_id": None, "non_premium_pack_id": None}
         outcomes = [LineOutcome.model_validate(raw) for raw in state["outcomes"]]
-        if not outcomes:
-            return {"pack_id": None}
-        pack = gate.assemble_pack(day, outcomes, state["actor"], policy)
-        store.save_pack(pack)
-        store.save_allocations([e.allocation for e in pack.entries if e.allocation], pack.pack_id)
-        store.audit(AuditEvent(at=_now(), actor=state["actor"], action="pack_assembled", subject=pack.pack_id,
-                               detail=f"{len(pack.entries)} entries, allocations {pack.allocation_total}"))
-        webhooks.emit(store, "pack_assembled", pack.pack_id, state["actor"], {
-            "allocations": str(pack.allocation_total),
-            "entries": str(len(pack.entries)),
-        }, pack_kind="posting")
-        return {"pack_id": pack.pack_id}
+        if outcomes:
+            pack = gate.assemble_pack(day, outcomes, state["actor"], policy)
+            store.save_pack(pack)
+            store.save_allocations([e.allocation for e in pack.entries if e.allocation], pack.pack_id)
+            store.audit(AuditEvent(at=_now(), actor=state["actor"], action="pack_assembled", subject=pack.pack_id,
+                                   detail=f"{len(pack.entries)} entries, allocations {pack.allocation_total}"))
+            webhooks.emit(store, "pack_assembled", pack.pack_id, state["actor"], {
+                "allocations": str(pack.allocation_total),
+                "entries": str(len(pack.entries)),
+            }, pack_kind="posting")
+            result["pack_id"] = pack.pack_id
+        classified = state.get("classified") or []
+        if classified:
+            by_id = {l.bank_line_id: l for l in store.bank_lines(on=day)}
+            pairs = [(by_id[c["bank_line_id"]], c["kind"]) for c in classified]
+            npack = nonpremium.assemble_disposition_pack(store, day, pairs, state["actor"])
+            if npack is not None:
+                result["non_premium_pack_id"] = npack.pack_id
+        return result
+
+    def combine(state: DayState) -> DayState:
+        # The combination pass: after the per-line tiers and the
+        # day's packs, look for same-payer pairs whose cash together
+        # settles one open installment exactly. Proposals only —
+        # they land in a PACK-COMB pack at the same gate.
+        day = date.fromisoformat(state["day"])
+        summary = combinations.propose_combinations(store, state["actor"], day)
+        return {"combination_pack_id": summary["pack_id"]}
 
     def sweep(state: DayState) -> DayState:
         day = date.fromisoformat(state["day"])
@@ -306,12 +352,13 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
 
     graph = StateGraph(DayState)
     for name, fn in [("screen", screen), ("read", read), ("match", match),
-                     ("persist", persist), ("assemble", assemble), ("sweep", sweep),
-                     ("report", report)]:
+                     ("persist", persist), ("assemble", assemble), ("combine", combine),
+                     ("sweep", sweep), ("report", report)]:
         graph.add_node(name, fn)
     graph.set_entry_point("screen")
     for a, b in [("screen", "read"), ("read", "match"), ("match", "persist"),
-                 ("persist", "assemble"), ("assemble", "sweep"), ("sweep", "report")]:
+                 ("persist", "assemble"), ("assemble", "combine"), ("combine", "sweep"),
+                 ("sweep", "report")]:
         graph.add_edge(a, b)
     graph.add_edge("report", END)
     return graph.compile(checkpointer=_checkpointer())
@@ -374,6 +421,8 @@ def run_day(store: Store, objects: ObjectStore, reader, policy: PolicyConfig,
     return {
         "day": day.isoformat(),
         "pack_id": result.get("pack_id"),
+        "non_premium_pack_id": result.get("non_premium_pack_id"),
+        "combination_pack_id": result.get("combination_pack_id"),
         "document_notes": result.get("document_notes", []),
         "outcomes": result.get("outcomes", []),
         "report": result.get("report"),

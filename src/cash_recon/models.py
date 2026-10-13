@@ -274,12 +274,34 @@ class PayableOffset(BaseModel):
     amount: Decimal
 
 
+class NonPremiumEntry(BaseModel):
+    """One bank line classified as not premium cash at all — a bank
+    fee rebate, an interest credit, a transfer between the carrier's
+    own accounts. The line rides a disposition pack (an NPACK-*
+    PostingPack) to the same human gate as everything else, and
+    posts to the non-premium ledger view: it never touches a
+    receivable and never enters suspense."""
+
+    bank_line_id: str
+    kind: str  # "BANK_FEE" | "INTEREST" | "OWN_TRANSFER" | "OTHER_NON_PREMIUM"
+    amount: Decimal
+    payer_name: str
+    narrative: str = ""
+
+
 class PostingEntry(BaseModel):
     """One line of a posting pack: an allocation, or a delta write-off."""
 
-    kind: str  # "allocation" | "write_off" | "payable_offset"
+    kind: str  # "allocation" | "write_off" | "payable_offset" | "non_premium"
     allocation: Allocation | None = None
     payable_offset: PayableOffset | None = None
+    non_premium: NonPremiumEntry | None = None
+    # Set on the allocation entries of a combination settlement:
+    # two bank lines (the legs) whose cash together settles one
+    # installment exactly. Entries sharing a combination id are
+    # approved together or not at all, and each leg grosses up at
+    # the commission rate in force on its own value date.
+    combination_id: str | None = None
     write_off_policy: str | None = None
     write_off_amount: Decimal | None = None
     write_off_exception_id: str | None = None
@@ -326,6 +348,13 @@ class PostingPack(BaseModel):
     def offset_total(self) -> Decimal:
         return sum(
             (e.payable_offset.amount for e in self.entries if e.payable_offset),
+            Decimal("0.00"),
+        )
+
+    @property
+    def non_premium_total(self) -> Decimal:
+        return sum(
+            (e.non_premium.amount for e in self.entries if e.non_premium),
             Decimal("0.00"),
         )
 

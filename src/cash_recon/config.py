@@ -45,6 +45,45 @@ class Policy:
         )
 
 
+# ---------------------------------------------------------------------------
+# Non-premium classification: bank lines that are not premium cash.
+#
+# Real statements carry lines that are not premium at all — the bank's
+# own fee rebate, an interest credit on the premium trust account, a
+# transfer between the carrier's own accounts. Left to the tiers they
+# land in UNIDENTIFIED suspense and pollute the aging auditors watch.
+# The classifier (nonpremium.py) is code-first and conservative: a
+# line is classified only when it matches a rule below EXACTLY —
+# every field a rule names must match. `payer_exact` compares the
+# whole payer name after case/whitespace normalisation: a payer that
+# merely resembles the carrier ("Northgate Builders LLC") is not the
+# carrier, and a bank line whose narrative does not name the rule's
+# text is not classified either. Anything ambiguous stays
+# UNIDENTIFIED suspense, exactly as before. The model never
+# classifies these lines.
+#
+# A rule matches when ALL of its named fields match:
+#   payer_exact        the payer name, exactly (normalised)
+#   narrative_contains a substring of the line's narrative (lowercase)
+#   reference_prefix   the line's reference starts with this
+NON_PREMIUM_RULES: tuple[dict, ...] = (
+    {
+        "kind": "OWN_TRANSFER",
+        "payer_exact": "Northgate Specialty Insurance",
+    },
+    {
+        "kind": "INTEREST",
+        "payer_exact": "Northgate Bank",
+        "narrative_contains": "interest",
+    },
+    {
+        "kind": "BANK_FEE",
+        "payer_exact": "Northgate Bank",
+        "narrative_contains": "fee",
+    },
+)
+
+
 @dataclass(frozen=True)
 class WatchPolicy:
     """The match-quality watch's tolerances, in the same one place.

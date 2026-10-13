@@ -108,6 +108,12 @@ def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) 
         raise GateError(f"pack {pack_id} is {pack.status.value}; only a proposed pack can be edited")
     if not actor or actor == pack.assembled_by:
         raise GateError("pack entries are edited by a named approver-side person, not the assembler")
+    if any(e.combination_id for e in pack.entries):
+        raise GateError(
+            "a combination settlement is edited by nobody: its legs settle "
+            "exactly as proposed, together, or the pack is rejected and the "
+            "pair proposed again against the books as they then stand"
+        )
     if not adjustments:
         raise GateError("an edit names at least one adjustment")
 
@@ -224,6 +230,56 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
         if second_approver in (approver, pack.assembled_by):
             raise GateError("the second approver must differ from the approver and the assembler")
 
+    # Combination settlements are re-verified before anything is
+    # written, with the payout packs' discipline: the pair was
+    # proven against the books at proposal, and if the target
+    # installment has moved since — another pack settled part of
+    # it — the pack is refused whole rather than applying a stale
+    # proof. Each leg is priced at the rate in force on its own
+    # value date, exactly as the proposal priced it.
+    comb_groups: dict[str, list] = {}
+    for entry in pack.entries:
+        if entry.combination_id and entry.allocation:
+            comb_groups.setdefault(entry.combination_id, []).append(entry.allocation)
+    line_dates = {l.bank_line_id: l.value_date for l in store.bank_lines()}
+    comb_brokers = {b.broker_id: b for b in store.brokers()}
+    comb_rates: dict[tuple[str, str], object] = {}
+    for comb_id, allocs in comb_groups.items():
+        targets = {(a.policy_number, a.installment_id) for a in allocs}
+        if len(allocs) != 2 or len(targets) != 1:
+            raise GateError(
+                f"combination {comb_id} does not stand as two legs on one "
+                "installment; it cannot be approved"
+            )
+        (policy_number, installment_id), = targets
+        rec = store.receivable(policy_number)
+        inst = next(
+            (i for i in rec.installments if i.installment_id == installment_id), None
+        ) if rec is not None else None
+        if inst is None:
+            raise GateError(
+                f"combination {comb_id} names {installment_id}, which is no "
+                "longer on the books"
+            )
+        broker = comb_brokers.get(rec.broker_id) if rec.broker_id else None
+        proved = ZERO
+        for alloc in allocs:
+            if broker is None:
+                gross = alloc.amount
+                comb_rates[(comb_id, alloc.bank_line_id)] = None
+            else:
+                rate = broker.rate_on(line_dates[alloc.bank_line_id])
+                gross = cents(alloc.amount / (1 - rate))
+                comb_rates[(comb_id, alloc.bank_line_id)] = rate
+            proved += gross
+        if proved != inst.open_balance:
+            raise GateError(
+                f"combination {comb_id} no longer settles {installment_id}: "
+                f"its legs price to {proved} against the installment's "
+                f"standing open balance {inst.open_balance}; the books moved "
+                "since the proposal — the pack is refused whole"
+            )
+
     # Payable offsets are validated before anything is written: a
     # payable that moved since the pack was assembled refuses the
     # approval whole, with the pack still proposed and nothing
@@ -262,8 +318,16 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
             inst = next(i for i in rec.installments if i.installment_id == alloc.installment_id)
             # The settlement rate is the one in force on the pack's
             # value date — the day the cash was worked — not whatever
-            # the broker's rate has become by approval day.
-            rate = brokers[rec.broker_id].rate_on(pack.value_date) if rec.broker_id else None
+            # the broker's rate has become by approval day. The one
+            # exception is a combination leg: the pair was proven
+            # with each leg priced at the rate in force on the day
+            # its own cash arrived (the legs can straddle a rate
+            # change), so the leg applies at that rate, the price it
+            # was proposed at.
+            if entry.combination_id:
+                rate = comb_rates.get((entry.combination_id, alloc.bank_line_id))
+            else:
+                rate = brokers[rec.broker_id].rate_on(pack.value_date) if rec.broker_id else None
             _apply(rec, inst, alloc, rate)
             touched[alloc.policy_number] = rec
         elif entry.kind == "write_off" and entry.write_off_exception_id:
@@ -288,6 +352,20 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
             rec.status = PolicyStatus.PAID_IN_FULL
         store.upsert_receivable(rec)
 
+    # A combination's legs carried open exceptions (UNIDENTIFIED,
+    # typically) from their per-line workings. The settlement the
+    # gate just approved disposes of them: the cash is applied, and
+    # the exceptions close with it, as a re-match recovery closes
+    # its line's exceptions.
+    if comb_groups:
+        leg_line_ids = {
+            a.bank_line_id for allocs in comb_groups.values() for a in allocs
+        }
+        for exc in store.exceptions(status="open"):
+            if exc.bank_line_id in leg_line_ids:
+                exc.status = "resolved"
+                store.update_exception(exc)
+
     store.audit(AuditEvent(at=_now(), actor=approver, action="pack_approved", subject=pack_id,
                            detail=f"allocations {pack.allocation_total}, write-offs {pack.write_off_total}, "
                                   f"payable offsets {pack.offset_total}, "
@@ -296,6 +374,7 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
         "allocations": as_str(pack.allocation_total),
         "write_offs": as_str(pack.write_off_total),
         "payable_offsets": as_str(pack.offset_total),
+        "non_premium": as_str(pack.non_premium_total),
     }, pack_kind="posting")
     return pack
 
@@ -335,11 +414,26 @@ def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
     pack.status = pack.status.REJECTED
     pack.decided_at = _now()
     store.save_pack(pack)
+    # A combination's legs were held from suspense at proposal.
+    # Rejection frees them: their items re-open with the original
+    # received dates (the aging clock never stopped being true),
+    # and the pair can be proposed again when the books change.
+    comb_line_ids = {
+        e.allocation.bank_line_id for e in pack.entries
+        if e.combination_id and e.allocation
+    }
+    if comb_line_ids:
+        for item in store.suspense_items():
+            if item.bank_line_id in comb_line_ids and item.status == "resolved":
+                item.status = "open"
+                item.resolved_on = None
+                store.save_suspense(item)
     store.audit(AuditEvent(at=_now(), actor=actor, action="pack_rejected", subject=pack_id, detail=reason))
     webhooks.emit(store, "pack_rejected", pack_id, actor, {
         "allocations": as_str(pack.allocation_total),
         "write_offs": as_str(pack.write_off_total),
         "payable_offsets": as_str(pack.offset_total),
+        "non_premium": as_str(pack.non_premium_total),
     }, pack_kind="posting")
     return pack
 
@@ -359,6 +453,12 @@ def posting_file(pack: PostingPack) -> str:
             writer.writerow([pack.pack_id, pack.value_date.isoformat(), "premium_cash",
                              a.policy_number, a.installment_id, a.bank_line_id,
                              f"{a.amount:.2f}", a.tier.value if a.tier else "PROPOSED",
+                             ";".join(pack.approvals)])
+        elif entry.kind == "non_premium" and entry.non_premium:
+            np = entry.non_premium
+            writer.writerow([pack.pack_id, pack.value_date.isoformat(), "non_premium",
+                             "", np.kind, np.bank_line_id,
+                             f"{np.amount:.2f}", "",
                              ";".join(pack.approvals)])
         elif entry.kind == "payable_offset" and entry.payable_offset:
             o = entry.payable_offset
