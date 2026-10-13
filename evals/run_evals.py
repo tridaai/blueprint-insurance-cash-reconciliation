@@ -24,7 +24,13 @@ resolved by its own narrative, an amount two brokers' rates both
 explain where only the narrative disambiguates, a wire with no
 defensible candidate at all, and a rejected docket — the scan's
 candidate set and the gate's choice graded, never a model's
-taste. The broker statement case reconciles the shipped example
+taste. The disposition scenarios run in small worlds of their
+own: aged unidentified cash written off under dual control (the
+close footing through its disposed term), an escheat-review item
+listed but never counted as income, and the refusal matrix —
+too young, self-approval, a single approver, a standing
+resolution docket, a partially applied item, an open return
+chain — each refused in words with the books unchanged. The broker statement case reconciles the shipped example
 statement for October — one planted row of each class — against
 the pipeline's books, its counts and both footing identities
 pinned, with a tampered control total refused whole. The live-mode
@@ -49,6 +55,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cash_recon.config import Policy as PolicyConfig  # noqa: E402
 from cash_recon.dataset import build_dataset, build_november_dataset, build_october_dataset  # noqa: E402
+from cash_recon.dispositions import (  # noqa: E402
+    DispositionError,
+    assemble_disposition_pack,
+    disposition_ledger,
+)
 from cash_recon.gate import approve_pack, reject_pack  # noqa: E402
 from cash_recon.llm import OfflineReader  # noqa: E402
 from cash_recon.models import (  # noqa: E402
@@ -60,6 +71,7 @@ from cash_recon.models import (  # noqa: E402
     PolicyStatus,
     Receivable,
     Remittance,
+    ResolutionInfo,
     SuspenseItem,
 )
 from cash_recon.objects import InMemoryObjectStore  # noqa: E402
@@ -302,6 +314,60 @@ def golden_rows() -> list[dict]:
                 "item_status": "open",
                 "chosen_candidate": None,
                 "quality_rejected": 2,
+            },
+        },
+    ])
+    rows.extend([
+        {
+            # Aged unidentified cash, written off under dual
+            # control: the close roll takes it out through the
+            # disposed term, split by kind, and foots.
+            "case": "DISPOSITION-WRITE-OFF", "kind": "disposition",
+            "expect": {
+                "item_status": "dispositioned",
+                "disposition_kind": "WRITE_OFF_INCOME",
+                "close_opening": "1250.00",
+                "close_disposed": "1250.00",
+                "close_disposed_write_off": "1250.00",
+                "close_disposed_escheat": "0.00",
+                "close_closing": "0.00",
+                "close_footed": True,
+                "aging_open_after": 0,
+                "day_decided_write_off": "1250.00",
+            },
+        },
+        {
+            # Escheat review: the item is on its own list, in the
+            # close's disposed term under its own kind — and never
+            # in the write-off (income) figure.
+            "case": "DISPOSITION-ESCHEAT", "kind": "disposition",
+            "expect": {
+                "item_status": "dispositioned",
+                "disposition_kind": "ESCHEAT_REVIEW",
+                "escheat_listed": ["SUS-BL-E1"],
+                "ledger_write_off_items": 0,
+                "close_disposed": "640.00",
+                "close_disposed_write_off": "0.00",
+                "close_disposed_escheat": "640.00",
+                "close_footed": True,
+            },
+        },
+        {
+            # The refusal matrix: each act refused in words, and
+            # the books exactly as they stood — every item open,
+            # nothing dispositioned, no pack approved.
+            "case": "DISPOSITION-REFUSALS", "kind": "disposition",
+            "expect": {
+                "too_young_refused": True,
+                "self_approval_refused": True,
+                "single_approver_refused": True,
+                "second_is_assembler_refused": True,
+                "docket_refused": True,
+                "partial_refused": True,
+                "return_chain_refused": True,
+                "items_still_open": 5,
+                "ledger_items": 0,
+                "packs_approved": 0,
             },
         },
     ])
@@ -964,6 +1030,173 @@ def resolution_scenarios() -> dict[str, dict]:
     }
 
 
+def disposition_scenarios() -> dict[str, dict]:
+    """The suspense disposition cases, in small worlds of their
+    own: the lifecycle's governed end — eligibility in code, dual
+    control at the gate, the close footing through the disposed
+    term, escheat visibility, and the refusal matrix with the
+    books unchanged."""
+    from decimal import Decimal as D
+
+    from cash_recon.close_pack import close_pack_export
+    from cash_recon.gate import GateError
+    from cash_recon.models import Allocation, PostingEntry, PostingPack
+    from cash_recon.returns import record_return
+
+    policy = PolicyConfig()
+    as_of = date(2026, 10, 20)
+    second = "Tomas Reyes"
+    aged = date(2026, 6, 15)
+
+    def park(store, line, reason="UNIDENTIFIED", amount=None):
+        store.add_bank_line(line)
+        store.save_suspense(SuspenseItem(
+            suspense_id=f"SUS-{line.bank_line_id}", bank_line_id=line.bank_line_id,
+            amount=amount if amount is not None else line.amount,
+            received_date=line.value_date, reason=reason, currency=line.currency))
+        store.add_exception(ExceptionRecord(
+            exception_id=f"EXC-{line.bank_line_id}", code=ExceptionCode.UNIDENTIFIED,
+            bank_line_id=line.bank_line_id, policy_number=None, broker_id=None,
+            amount=line.amount, currency=line.currency,
+            detail="planted unidentified cash", first_seen=line.value_date))
+        return f"SUS-{line.bank_line_id}"
+
+    def aged_line(bid, amount, received=aged):
+        return BankLine(bank_line_id=bid, value_date=received, amount=D(amount),
+                        payer_name="Unknown Remitter", reference=None,
+                        narrative="premium payment")
+
+    # Case 1: the write-off, end to end.
+    store = InMemoryStore()
+    sid = park(store, aged_line("BL-W1", "1250.00"))
+    pack = assemble_disposition_pack(
+        store, [{"suspense_id": sid, "kind": "WRITE_OFF_INCOME",
+                 "reason": "payer untraceable after three letters"}],
+        ASSEMBLER, as_of, policy)
+    approve_pack(store, pack.pack_id, CONTROLLER, policy, second_approver=second)
+    item = store.suspense_items()[0]
+    roll = close_pack_export(store, 2026, 10)["pack"]["control_roll"]
+    write_off = {
+        "item_status": item.status,
+        "disposition_kind": item.disposition_kind,
+        "close_opening": roll["opening_suspense"],
+        "close_disposed": roll["disposed_from_suspense"],
+        "close_disposed_write_off": roll["disposed_by_kind"]["WRITE_OFF_INCOME"],
+        "close_disposed_escheat": roll["disposed_by_kind"]["ESCHEAT_REVIEW"],
+        "close_closing": roll["closing_suspense"],
+        "close_footed": roll["footed"],
+        "aging_open_after": sum(
+            b["count"] for b in suspense_aging(store, date(2026, 11, 1))),
+        "day_decided_write_off": day_report(store, as_of, policy)[
+            "suspense_dispositions"]["decided_totals_by_kind"].get("WRITE_OFF_INCOME"),
+    }
+
+    # Case 2: escheat review — listed, never income.
+    store = InMemoryStore()
+    sid = park(store, aged_line("BL-E1", "640.00"))
+    pack = assemble_disposition_pack(
+        store, [{"suspense_id": sid, "kind": "ESCHEAT_REVIEW",
+                 "reason": "payer dissolved; funds may be owed to the estate"}],
+        ASSEMBLER, as_of, policy)
+    approve_pack(store, pack.pack_id, CONTROLLER, policy, second_approver=second)
+    ledger = disposition_ledger(store)
+    roll = close_pack_export(store, 2026, 10)["pack"]["control_roll"]
+    escheat = {
+        "item_status": store.suspense_items()[0].status,
+        "disposition_kind": store.suspense_items()[0].disposition_kind,
+        "escheat_listed": [r["suspense_id"] for r in ledger["escheat_review"]],
+        "ledger_write_off_items": len([
+            r for r in ledger["items"] if r["kind"] == "WRITE_OFF_INCOME"]),
+        "close_disposed": roll["disposed_from_suspense"],
+        "close_disposed_write_off": roll["disposed_by_kind"]["WRITE_OFF_INCOME"],
+        "close_disposed_escheat": roll["disposed_by_kind"]["ESCHEAT_REVIEW"],
+        "close_footed": roll["footed"],
+    }
+
+    # Case 3: the refusal matrix.
+    store = InMemoryStore()
+    young = park(store, aged_line("BL-R1", "300.00", received=date(2026, 9, 25)))
+    open_item = park(store, aged_line("BL-R2", "800.00"))
+    docketed = park(store, aged_line("BL-R3", "450.00"))
+    store.save_pack(PostingPack(
+        pack_id="PACK-RESOLVE-2026-10-19-SUS-BL-R3", value_date=date(2026, 10, 19),
+        assembled_by=ASSEMBLER,
+        resolution=ResolutionInfo(suspense_id=docketed, bank_line_id="BL-R3",
+                                  amount=D("450.00"))))
+
+    def partly_applied(bid, item_amount):
+        store.upsert_receivable(Receivable(
+            policy_number=f"NSP-{bid}", insured_name=f"Insured {bid}",
+            broker_id=None, status=PolicyStatus.ACTIVE,
+            installments=[Installment(
+                installment_id=f"NSP-{bid}-I1", policy_number=f"NSP-{bid}",
+                sequence=1, due_date=date(2026, 6, 1), amount_due=D("1000.00"))]))
+        line = BankLine(bank_line_id=bid, value_date=aged, amount=D("1000.00"),
+                        payer_name="Direct Payer", reference=f"NSP-{bid}",
+                        narrative="part payment")
+        store.add_bank_line(line)
+        day_pack = PostingPack(pack_id=f"PACK-2026-06-15-{bid}", value_date=aged,
+                               assembled_by=ASSEMBLER)
+        day_pack.entries.append(PostingEntry(kind="allocation", allocation=Allocation(
+            bank_line_id=bid, policy_number=f"NSP-{bid}",
+            installment_id=f"NSP-{bid}-I1", amount=D("600.00"), tier=None)))
+        store.save_pack(day_pack)
+        approve_pack(store, day_pack.pack_id, CONTROLLER, policy)
+        return park(store, line, reason="PARTIAL", amount=D(item_amount))
+
+    partial = partly_applied("BL-R4", "400.00")
+    chained = partly_applied("BL-R5", "400.00")
+    record_return(store, "BL-R5", "NSF", CONTROLLER, date(2026, 8, 1),
+                  amount=D("200.00"))
+
+    def refused(fn, needle):
+        try:
+            fn()
+        except (DispositionError, GateError) as exc:
+            return needle in str(exc)
+        return False
+
+    spec = lambda s: [{"suspense_id": s, "kind": "WRITE_OFF_INCOME",
+                       "reason": "aged past identification"}]
+    standing = assemble_disposition_pack(store, spec(open_item), ASSEMBLER, as_of, policy)
+    refusals = {
+        "too_young_refused": refused(
+            lambda: assemble_disposition_pack(store, spec(young), ASSEMBLER, as_of, policy),
+            "90-day"),
+        "self_approval_refused": refused(
+            lambda: approve_pack(store, standing.pack_id, ASSEMBLER, policy,
+                                 second_approver=second),
+            "self-approval"),
+        "single_approver_refused": refused(
+            lambda: approve_pack(store, standing.pack_id, CONTROLLER, policy),
+            "dual-control"),
+        "second_is_assembler_refused": refused(
+            lambda: approve_pack(store, standing.pack_id, CONTROLLER, policy,
+                                 second_approver=ASSEMBLER),
+            "neither approver"),
+        "docket_refused": refused(
+            lambda: assemble_disposition_pack(store, spec(docketed), ASSEMBLER, as_of, policy),
+            "resolution pack"),
+        "partial_refused": refused(
+            lambda: assemble_disposition_pack(store, spec(partial), ASSEMBLER, as_of, policy),
+            "not wholly unapplied"),
+        "return_chain_refused": refused(
+            lambda: assemble_disposition_pack(store, spec(chained), ASSEMBLER, as_of, policy),
+            "open return chain"),
+        "items_still_open": len([
+            i for i in store.suspense_items() if i.status == "open"]),
+        "ledger_items": len(disposition_ledger(store)["items"]),
+        "packs_approved": len([
+            p for p in store.packs() if p.status.value == "approved"
+            and p.disposition is not None]),
+    }
+    return {
+        "DISPOSITION-WRITE-OFF": write_off,
+        "DISPOSITION-ESCHEAT": escheat,
+        "DISPOSITION-REFUSALS": refusals,
+    }
+
+
 def returns_scenarios() -> dict[str, dict]:
     """The planted return cases, in small worlds of their own: an
     NSF return that re-opens a settled policy (and the re-send that
@@ -1552,6 +1785,17 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 passed += 1
         elif row["kind"] == "resolution":
             observed = resolution_scenarios()[case]
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "disposition":
+            observed = disposition_scenarios()[case]
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()
