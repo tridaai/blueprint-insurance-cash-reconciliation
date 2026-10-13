@@ -15,6 +15,12 @@ from datetime import date
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import WatchPolicy
+from .dispositions import (
+    DispositionError,
+    assemble_disposition_pack,
+    disposition_candidates,
+    disposition_ledger,
+)
 from .line_export import LineExportError, line_export, render_line_export_text
 from .trends import match_quality
 from .config import Policy as PolicyConfig
@@ -57,6 +63,15 @@ def main() -> None:
     rsa.add_argument("suspense_id")
     rsa.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     rsa.add_argument("--actor", default="cash-team")
+    dcan = sub.add_parser("dispose-candidates", help="every open suspense item with its disposition eligibility and blockers (age floor: SUSPENSE_DISPOSITION_MIN_AGE_DAYS)")
+    dcan.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
+    dasm = sub.add_parser("dispose-assemble", help="assemble a suspense disposition pack: per item a kind (WRITE_OFF_INCOME | ESCHEAT_REVIEW) and a written reason; approval at the gate always takes two approvers")
+    dasm.add_argument("--items", required=True,
+                      help='JSON list, e.g. [{"suspense_id": "SUS-...", "kind": "WRITE_OFF_INCOME", "reason": "..."}]')
+    dasm.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
+    dasm.add_argument("--actor", default="cash-team")
+    dled = sub.add_parser("dispositions", help="the disposition ledger: items disposed of by kind, the escheat-review list, and what stands proposed")
+    dled.add_argument("--month", help="YYYY-MM; default: all months")
     sco = sub.add_parser("scorecard", help="print the broker netting scorecard")
     sco.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     clo = sub.add_parser("close", help="print a month-end close pack (a report, not a lock)")
@@ -183,6 +198,23 @@ def main() -> None:
         except ResolutionError as exc:
             parser.exit(1, f"assembly refused: {exc}\n")
         print(json.dumps(json.loads(pack.model_dump_json()), indent=2))
+    elif args.command == "dispose-candidates":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        print(json.dumps(disposition_candidates(store, as_of, policy), indent=2))
+    elif args.command == "dispose-assemble":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        try:
+            specs = json.loads(args.items)
+        except ValueError as exc:
+            parser.exit(1, f"assembly refused: --items is not a JSON list: {exc}\n")
+        try:
+            pack = assemble_disposition_pack(store, specs, args.actor, as_of, policy)
+        except DispositionError as exc:
+            parser.exit(1, f"assembly refused: {exc}\n")
+        print(json.dumps(json.loads(pack.model_dump_json()), indent=2))
+    elif args.command == "dispositions":
+        month = parse_month(args.month) if args.month else None
+        print(json.dumps(disposition_ledger(store, month=month), indent=2))
     elif args.command == "scorecard":
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         print(json.dumps(broker_scorecard(store, as_of), indent=2))

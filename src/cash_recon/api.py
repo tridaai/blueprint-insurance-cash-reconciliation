@@ -29,6 +29,12 @@ from .broker_statement import (
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import WatchPolicy
+from .dispositions import (
+    DispositionError,
+    assemble_disposition_pack,
+    disposition_candidates,
+    disposition_ledger,
+)
 from .line_export import LineExportError, line_export, render_line_export_text
 from .trends import match_quality
 from .config import Policy as PolicyConfig
@@ -83,6 +89,18 @@ class RematchRequest(BaseModel):
 class ResolutionRequest(BaseModel):
     actor: str = "cash-team"
     as_of: date | None = None
+
+
+class DispositionItemRequest(BaseModel):
+    suspense_id: str
+    kind: str  # WRITE_OFF_INCOME | ESCHEAT_REVIEW
+    reason: str
+
+
+class DispositionAssembleRequest(BaseModel):
+    actor: str = "cash-team"
+    as_of: date | None = None
+    items: list[DispositionItemRequest]
 
 
 class StatementImportRequest(BaseModel):
@@ -334,6 +352,34 @@ def create_app(service: Service | None = None) -> FastAPI:
     def suspense(as_of: date | None = None):
         s = get_service()
         return report_mod.suspense_aging(s.store, as_of or date.today())
+
+    @app.get("/api/suspense/dispositions")
+    def suspense_disposition_candidates(as_of: date | None = None):
+        s = get_service()
+        return disposition_candidates(s.store, as_of or date.today(), s.policy)
+
+    @app.post("/api/suspense/dispositions/assemble")
+    def suspense_disposition_assemble(body: DispositionAssembleRequest):
+        s = get_service()
+        try:
+            pack = assemble_disposition_pack(
+                s.store,
+                [i.model_dump() for i in body.items],
+                body.actor, body.as_of or date.today(), s.policy)
+        except DispositionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return present(pack)
+
+    @app.get("/api/suspense/disposition-ledger")
+    def suspense_disposition_ledger(month: str | None = None):
+        s = get_service()
+        parsed = None
+        if month:
+            try:
+                parsed = parse_month(month)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        return disposition_ledger(s.store, month=parsed)
 
     @app.get("/api/brokers/scorecard")
     def scorecard(as_of: date | None = None):

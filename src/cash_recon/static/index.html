@@ -79,7 +79,7 @@
     <p class="note">Lines that are not premium cash at all — classified in code by exact config rules before the tiers, routed to a disposition pack (NPACK) at the same gate. They never enter suspense and never touch a receivable; they are a separate term of the day's footing above.</p>
     <div id="nonpremiumreport"></div>
     <h3>Payment returns</h3>
-    <p class="note">Cash the bank took back. A return is recorded against an <em>applied</em> bank line: its allocations reverse exactly, the packs that carried it are flagged RETURN_AFFECTED (their entries stand), and any suspense it held is released. Full-line returns only — a part-return is refused, in words. If the payer re-sends, the new line is matched on its own merits and linked to the returned original.</p>
+    <p class="note">Cash the bank took back. A return is recorded against an <em>applied</em> bank line: its allocations reverse exactly, the packs that carried it are flagged RETURN_AFFECTED (their entries stand), and any suspense it held is released. A return may take part of a line — it unwinds the line's suspense first, then its allocations in reverse order of application — and a return for more than still stands is refused, in words. If the payer re-sends, the new line is matched on its own merits and linked to the returned original.</p>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
       <input type="text" id="return-line" placeholder="Bank line id (e.g. BL-001)" size="18">
       <select id="return-reason" style="font:inherit; padding:7px 10px; border:1px solid var(--line); border-radius:8px">
@@ -90,6 +90,9 @@
       <span class="note" id="return-status"></span>
     </div>
     <div id="returnsreport"></div>
+    <h3>Suspense dispositions decided this day</h3>
+    <p class="note">Aged unidentified cash the gate disposed of under dual control — written off to income, or moved to escheat review (owed to someone; not income). The items leave open suspense on the pack's value date; the close pack takes them out of the roll through its disposed term.</p>
+    <div id="dispreport"></div>
     <h3>Per-line audit export</h3>
     <p class="note">The auditor's artifact for one bank line: the line as received (with its source and import batch), the tiers attempted in order, every allocation with its basis and any governed edit, every exception and re-match attempt, the gate history of the packs that carried it, returns and re-sends linked both ways, and a footing block that accounts for the line to the cent. Digested (SHA-256) and read-only — building it changes nothing.</p>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
@@ -167,6 +170,14 @@
     <p class="note">Unidentified cash — a wire nobody can attribute — can also be worked by a resolution scan: it reads the whole book for readings of the amount that foot exactly, or that the line's own text evidences, and puts them to the gate as a docket of alternates. The scan proposes; only an approver choosing one candidate applies anything.</p>
     <div id="resolution-result"></div>
     <div id="suspense"></div>
+    <h3 style="margin-top:22px">Suspense disposition</h3>
+    <p class="note">The governed end of the line for cash nobody could identify. An item at or past the disposition age floor, wholly unapplied, with no standing resolution docket and no open return chain, may be proposed for disposition: <strong>write off to income</strong>, or <strong>escheat review</strong>. Each item carries the assembler's written reason, and approval at the gate is dual control, always — two approvers, neither of them the assembler. Disposition is a state, never a deletion: the item stays on the record, and escheat-review cash stays listed below, because it is owed to someone.</p>
+    <div id="dispositions"></div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0">
+      <button id="dispose-assemble" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer">Assemble disposition pack from ticked items</button>
+      <span class="note" id="dispose-status"></span>
+    </div>
+    <div id="escheat"></div>
   </section>
   <section id="tab-packs" class="hidden">
     <h3 style="margin-top:0">Model proposal quality</h3>
@@ -275,6 +286,15 @@ async function loadReport() {
              {label: "Reversing packs", render: r => r.pack_ids.join(", ") || "—"}], rets.items)
       + `<p class="note">${rets.count} return(s) recorded this day, ${money(rets.total)} taken back by the bank — reversing entries; the original applications stand in their packs, flagged RETURN_AFFECTED.</p>`
     : "<p class='note'>No returns recorded on this day.</p>";
+  const disps = rep.suspense_dispositions || {count: 0, items: [], decided_totals_by_kind: {}};
+  $("dispreport").innerHTML = disps.count
+    ? table([{key: "suspense_id", label: "Item"}, {key: "bank_line_id", label: "Bank line"},
+             {key: "kind", label: "Kind"}, {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+             {key: "reason", label: "Reason on the record"},
+             {key: "pack_id", label: "Pack"}, {key: "status", label: "Status"},
+             {label: "Approvals", render: r => (r.approvals || []).join(", ") || "—"}], disps.items)
+      + `<p class="note">Decided this day: ${Object.entries(disps.decided_totals_by_kind).map(([k, v]) => `${k} ${money(v)}`).join(" · ") || "nothing approved yet"}. Approval is dual control, always — two approvers, neither of them the assembler.</p>`
+    : "<p class='note'>No suspense dispositions stand in packs dated this day.</p>";
   $("dayexceptions").innerHTML = exceptionTable(rep.exceptions);
 }
 async function recordReturn() {
@@ -329,6 +349,10 @@ async function loadClose() {
       {k: "Received into suspense", v: roll.received_into_suspense},
       {k: "Applied from suspense", v: roll.applied_from_suspense},
       {k: "Returned from suspense", v: roll.returned_from_suspense || "0.00"},
+      ...(Number(roll.disposed_from_suspense || "0.00") !== 0 ? [
+        {k: "Disposed from suspense", v: roll.disposed_from_suspense},
+        {k: "— of which write-off to income", v: (roll.disposed_by_kind || {}).WRITE_OFF_INCOME || "0.00"},
+        {k: "— of which escheat review (not income)", v: (roll.disposed_by_kind || {}).ESCHEAT_REVIEW || "0.00"}] : []),
       {k: "Payment returns in month (count)", v: (roll.returns_in_month || {count: 0}).count},
       {k: "Payment returns in month (total)", v: (roll.returns_in_month || {total: "0.00"}).total},
       {k: "Applied via approved packs", v: roll.applied_allocations_approved},
@@ -536,6 +560,50 @@ async function loadSuspense() {
            {key: "received_date", label: "Received"}, {key: "age_days", label: "Age (days)", num: 1}, {key: "reason", label: "Reason"},
            {label: "Audit", render: r => `<a href="/api/bank-lines/${encodeURIComponent(r.bank_line_id)}/audit-export/text" target="_blank">export ↗</a>`},
            {label: "Resolve", render: r => r.reason === "UNIDENTIFIED" ? `<button class="ghost" onclick="scanResolution('${r.suspense_id}')" style="font:inherit;padding:4px 9px;border:1px solid var(--accent);border-radius:8px;background:#fff;color:var(--accent);cursor:pointer">Scan for candidates</button>` : ""}], b.items)).join("");
+  loadDispositions().catch(e => setStatus(e.message));
+}
+async function loadDispositions() {
+  const view = await api(`/api/suspense/dispositions?as_of=${$("day").value}`);
+  const rows = view.items;
+  $("dispositions").innerHTML =
+    `<p class="note">Age floor ${view.min_age_days} days (SUSPENSE_DISPOSITION_MIN_AGE_DAYS), as of ${view.as_of}: ${rows.filter(r => r.eligible).length} of ${rows.length} open item(s) eligible. Tick the items to propose, choose a kind and give each a written reason, then assemble — the pack stops at the gate.</p>` +
+    (rows.length ? table([
+      {label: "Propose", render: r => r.eligible ? `<input type="checkbox" class="disp-pick" data-sid="${r.suspense_id}">` : ""},
+      {key: "suspense_id", label: "Item"}, {key: "bank_line_id", label: "Bank line"},
+      {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+      {key: "currency", label: "Ccy"}, {key: "age_days", label: "Age (days)", num: 1}, {key: "reason", label: "Held as"},
+      {label: "Kind", render: r => r.eligible ? `<select id="disp-kind-${r.suspense_id}" style="font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:8px"><option value="WRITE_OFF_INCOME">Write off to income</option><option value="ESCHEAT_REVIEW">Escheat review</option></select>` : ""},
+      {label: "Reason / blockers", render: r => r.eligible ? `<input type="text" id="disp-reason-${r.suspense_id}" placeholder="Written reason (required)" size="26" style="font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:8px">` : (r.blockers || []).join(" ")}], rows)
+    : "<p class='note'>No open suspense items.</p>");
+  const ledger = await api("/api/suspense/disposition-ledger");
+  const esc = ledger.escheat_review || [];
+  $("escheat").innerHTML = `<h4>Escheat review — owed to someone, not income (${esc.length})</h4>` +
+    (esc.length ? table([
+      {key: "suspense_id", label: "Item"}, {key: "bank_line_id", label: "Bank line"},
+      {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+      {key: "currency", label: "Ccy"}, {key: "received_date", label: "Received"},
+      {key: "dispositioned_on", label: "Moved to review"}, {key: "reason", label: "Reason on the record"},
+      {key: "pack_id", label: "Pack"}, {label: "Approvals", render: r => (r.approvals || []).join(", ")}], esc)
+    : "<p class='note'>Nothing stands in escheat review.</p>");
+}
+async function assembleDispositions() {
+  const name = $("actor").value.trim();
+  if (!name) return ($("dispose-status").textContent = "Enter your name first — a disposition pack is assembled by a named person.");
+  const picks = [...document.querySelectorAll(".disp-pick:checked")];
+  if (!picks.length) return ($("dispose-status").textContent = "Tick at least one eligible item.");
+  const items = [];
+  for (const pick of picks) {
+    const sid = pick.dataset.sid;
+    const reason = $(`disp-reason-${sid}`).value.trim();
+    if (!reason) return ($("dispose-status").textContent = `Item ${sid} needs a written reason.`);
+    items.push({suspense_id: sid, kind: $(`disp-kind-${sid}`).value, reason});
+  }
+  try {
+    const pack = await api("/api/suspense/dispositions/assemble", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({actor: name, as_of: $("day").value, items})});
+    $("dispose-status").textContent = `${pack.pack_id} assembled by ${name} — it stops at the gate; approval needs two approvers, neither of them the assembler.`;
+    loadPacks(); loadSuspense();
+  } catch (e) { $("dispose-status").textContent = "Assembly refused: " + e.message; }
 }
 async function scanResolution(suspenseId) {
   const name = $("actor").value.trim();
@@ -714,9 +782,14 @@ async function loadPacks() {
     const wo = p.entries.filter(e => e.kind === "write_off").reduce((s, e) => s + Number(e.write_off_amount), 0);
     const npTot = p.entries.filter(e => e.kind === "non_premium").reduce((s, e) => s + Number(e.non_premium.amount), 0);
     const res = p.resolution || null;
+    const disp = p.disposition || null;
+    const dispTot = disp ? disp.items.reduce((s, d) => s + Number(d.amount), 0) : 0;
     const actions = p.status === "proposed"
       ? (res
         ? `<button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject docket</button>`
+        : disp
+        ? `<button onclick="act('${p.pack_id}','approve')">Approve (dual control)</button>
+         <button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject</button>`
         : `<button onclick="act('${p.pack_id}','approve')">Approve</button>
          <button class="ghost" onclick="editEntries('${p.pack_id}')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Edit entries</button>
          <button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject</button>
@@ -730,9 +803,16 @@ async function loadPacks() {
              {label: "Evidence", render: c => c.evidence ? `“${c.evidence}” (${c.evidence_kind.replace("_", " ")})` : "—"},
              {label: "Flags", render: c => (c.flags || []).join(", ") || "—"},
              {label: "Decide", render: c => p.status === "proposed" && !(c.flags || []).length ? `<button onclick="resolveApprove('${p.pack_id}','${c.candidate_id}')">Approve ${c.candidate_id}</button>` : (res.chosen_candidate === c.candidate_id ? "chosen" : "")}], res.candidates) : "";
+    const dispBlock = disp ? `<p class="note">Suspense disposition pack — dual control: approval always takes two approvers, neither of them the assembler (${p.assembled_by}). The items stay open in suspense until the gate decides; a rejection leaves them open and aging.</p>` +
+      table([{key: "suspense_id", label: "Item"},
+             {key: "bank_line_id", label: "Bank line"},
+             {key: "kind", label: "Kind"},
+             {label: "Amount", num: 1, render: d => money(d.amount)},
+             {key: "currency", label: "Ccy"},
+             {key: "reason", label: "Reason on the record"}], disp.items) : "";
     return `<h3>${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span>${(p.flags || []).map(f => ` <span class="pill bad">${f}</span>`).join("")}</h3>
-      <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}${npTot ? `; non-premium dispositions ${money(npTot)}` : ""}. Approvals: ${p.approvals.join(", ") || "—"}${(p.flags || []).includes("RETURN_AFFECTED") ? " A line in this pack was returned by the bank; the entries stand as approved and the reversal lives on the return record." : ""}</p>
-      <p>${actions}</p>` + resBlock +
+      <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}${npTot ? `; non-premium dispositions ${money(npTot)}` : ""}${dispTot ? `; suspense dispositions ${money(dispTot)}` : ""}. Approvals: ${p.approvals.join(", ") || "—"}${(p.flags || []).includes("RETURN_AFFECTED") ? " A line in this pack was returned by the bank; the entries stand as approved and the reversal lives on the return record." : ""}</p>
+      <p>${actions}</p>` + resBlock + dispBlock +
       table([{label: "#", render: (r, i) => i},
              {key: "kind", label: "Kind"},
              {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.payable_offset ? r.payable_offset.policy_number : (r.non_premium ? r.non_premium.payer_name : (r.write_off_policy || "")))},
@@ -748,7 +828,7 @@ async function act(packId, kind) {
   if (!name) return setStatus("Enter your name first — the gate is named, never anonymous.");
   try {
     if (kind === "approve") {
-      const second = prompt("Second approver (only needed when write-offs exceed the single limit; leave empty otherwise):", "");
+      const second = prompt("Second approver (always required for a disposition pack; also required when write-offs exceed the single limit; leave empty otherwise):", "");
       await api(`/api/packs/${packId}/approve`, {method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({approver: name, second_approver: second || null})});
     } else {
@@ -817,6 +897,7 @@ $("seed").addEventListener("click", async () => {
   catch (e) { setStatus(e.message); }
 });
 $("rematch").addEventListener("click", runRematch);
+$("dispose-assemble").addEventListener("click", assembleDispositions);
 $("run").addEventListener("click", async () => {
   try {
     const r = await api(`/api/days/${$("day").value}/run`, {method: "POST", headers: {"Content-Type": "application/json"},
