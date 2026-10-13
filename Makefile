@@ -10,7 +10,7 @@
 # No uv? python3 -m venv .venv && source .venv/bin/activate, then:
 #   make install-pip
 
-.PHONY: install install-pip demo test evals serve
+.PHONY: install install-pip demo test evals evals-live serve
 
 install:
 	uv sync --extra dev
@@ -31,6 +31,13 @@ test:
 
 evals:
 	uv run python evals/run_evals.py
+
+# The live remittance-reading set: grades a real model's reading of
+# messy free-form advices. With no provider configured it prints
+# SKIPPED-LIVE and exits 0 — a non-result, never a pass. It is not
+# part of the standard gate above.
+evals-live:
+	uv run python evals/run_live_evals.py
 
 serve:
 	uv run uvicorn cash_recon.api:app --port 8000

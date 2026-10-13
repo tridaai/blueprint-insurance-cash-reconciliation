@@ -2,13 +2,21 @@
 
 Runs Northgate's synthetic September AND October through the real
 pipeline (offline reader, in-memory stores), approving each day's
-pack as a named controller the way the desk would, then scores
-every planted case against evals/golden.jsonl — gold by
+packs — the day pack, any non-premium disposition pack, any
+combination pack — as a named controller the way the desk would,
+then scores every planted case against evals/golden.jsonl — gold by
 construction, committed to the repo so the gate grades the pipeline
 against a fixed record, not against the dataset builder's current
 mood. September's close pack is snapshotted before October is
 ingested, so the continuity control (October's opening == September's
-closing) grades two independently assembled packs.
+closing) grades two independently assembled packs. October also
+carries the planted proofs for the combination pass (two bills
+settled by pairs of wires, a cent-short near miss and a cross-payer
+exact sum that must NOT combine) and the non-premium classifier
+(interest, an own transfer, a fee rebate, and a lookalike premium
+payment that must not be classified away). The live-mode
+remittance-reading set is a separate runner (run_live_evals.py)
+and is deliberately not part of this gate.
 
     python evals/run_evals.py            # score, print the verdict
     python evals/run_evals.py --write    # regenerate golden.jsonl
@@ -91,16 +99,51 @@ def golden_rows() -> list[dict]:
                 "proposed": gold.proposed,
             }
         )
+    october_lines = {l.bank_line_id: l for l in october.bank_lines}
+    for bid, sub_kind in sorted(october.non_premium_gold.items()):
+        rows.append(
+            {
+                "case": bid,
+                "kind": "non_premium",
+                "expect": {
+                    "kind": sub_kind,
+                    "pack_id": f"NPACK-{october_lines[bid].value_date.isoformat()}",
+                    "no_suspense_item": True,
+                    "no_allocations": True,
+                    "ledger_posted": True,
+                },
+            }
+        )
+    rows.append({
+        "case": "COMBINATIONS", "kind": "combinations",
+        "expect": {
+            "packs": ["PACK-COMB-2026-10-22", "PACK-COMB-2026-10-27"],
+            "fernway_legs": ["BL-110", "BL-111"],
+            "fernway_cash_total": "8784.00",
+            "gable_legs": ["BL-108", "BL-109"],
+            "gable_cash_total": "5460.00",
+            "nsp1050_applied": "6000.00",
+            "nsp1051_applied": "10000.00",
+            "nsp1050_open": "0.00",
+            "nsp1051_open": "0.00",
+            "near_miss_legs_open": ["BL-112", "BL-113"],
+            "cross_payer_legs_open": ["BL-114", "BL-115"],
+            "nsp1052_open": "5000.00",
+            "nsp1053_open": "4000.00",
+        },
+    })
     rows.append({
         "case": "CLOSE-2026-10", "kind": "close_october",
         "expect": {
             "opening_suspense": "64366.99",
             "september_closing_suspense": "64366.99",
-            "cash_received_in_month": "34753.66",
-            "received_into_suspense": "12810.76",
-            "closing_suspense": "77177.75",
+            "cash_received_in_month": "113495.09",
+            "received_into_suspense": "34954.75",
+            "applied_from_suspense": "14244.00",
+            "closing_suspense": "85077.74",
             "footed": True,
             "payable_ledger_footed": True,
+            "combination_settlements": "14244.00",
         },
     })
     rows.append({
@@ -229,7 +272,7 @@ def golden_rows() -> list[dict]:
             "sept_bank_foots": True, "sept_allocated_foots": True,
             "oct_bank_foots": True, "oct_allocated_foots": True,
             "sept_suspense_received": "61086.99",
-            "oct_suspense_received": "12810.76",
+            "oct_suspense_received": "34954.75",
             "sept_suspense_close_agrees": True,
             "oct_suspense_close_agrees": True,
             "oct_mismatch_value": "100.00",
@@ -273,6 +316,10 @@ def run_pipeline():
         reports[day.isoformat()] = result["report"]
         if result["pack_id"]:
             approve_pack(store, result["pack_id"], CONTROLLER, policy)
+        if result.get("non_premium_pack_id"):
+            approve_pack(store, result["non_premium_pack_id"], CONTROLLER, policy)
+        if result.get("combination_pack_id"):
+            approve_pack(store, result["combination_pack_id"], CONTROLLER, policy)
     # September's close is snapshotted BEFORE October lands on the
     # books: the continuity control compares two packs assembled
     # from different states of the world, which is the point.
@@ -288,6 +335,10 @@ def run_pipeline():
         reports[day.isoformat()] = result["report"]
         if result["pack_id"]:
             approve_pack(store, result["pack_id"], CONTROLLER, policy)
+        if result.get("non_premium_pack_id"):
+            approve_pack(store, result["non_premium_pack_id"], CONTROLLER, policy)
+        if result.get("combination_pack_id"):
+            approve_pack(store, result["combination_pack_id"], CONTROLLER, policy)
     return ds, store, outcomes, reports, september_close, september_close_again
 
 
@@ -314,6 +365,61 @@ def _mini_advice(day, lines, total):
         f"Total remitted: {total:,.2f}",
     ]
     return "\n".join(body)
+
+
+def combinations_observed(store) -> dict:
+    """What the combination pass did on the full books: the packs
+    it proposed, the pairs it proved, what approval applied to the
+    two target bills, and — as important — the two planted pairs
+    it must have left alone (a cent-short near miss and an exact
+    sum across two different payers)."""
+    comb_packs = sorted(
+        p.pack_id for p in store.packs() if p.pack_id.startswith("PACK-COMB")
+    )
+    legs_by_pack: dict[str, list[str]] = {}
+    totals: dict[str, str] = {}
+    for pack in store.packs():
+        if not pack.pack_id.startswith("PACK-COMB"):
+            continue
+        legs_by_pack[pack.pack_id] = sorted(
+            e.allocation.bank_line_id for e in pack.entries if e.allocation
+        )
+        totals[pack.pack_id] = str(pack.allocation_total)
+    comb_leg_lines = {
+        e.allocation.bank_line_id
+        for p in store.packs() if p.pack_id.startswith("PACK-COMB")
+        for e in p.entries if e.allocation
+    }
+
+    def open_items(*line_ids):
+        return sorted(
+            lid for lid in line_ids
+            if any(i.bank_line_id == lid and i.status == "open"
+                   for i in store.suspense_items())
+            and lid not in comb_leg_lines
+        )
+
+    def applied_and_open(policy_number):
+        rec = store.receivable(policy_number)
+        return str(rec.installments[0].amount_applied), str(rec.open_balance)
+
+    nsp1050_applied, nsp1050_open = applied_and_open("NSP-1050")
+    nsp1051_applied, nsp1051_open = applied_and_open("NSP-1051")
+    return {
+        "packs": comb_packs,
+        "fernway_legs": legs_by_pack.get("PACK-COMB-2026-10-22", []),
+        "fernway_cash_total": totals.get("PACK-COMB-2026-10-22"),
+        "gable_legs": legs_by_pack.get("PACK-COMB-2026-10-27", []),
+        "gable_cash_total": totals.get("PACK-COMB-2026-10-27"),
+        "nsp1050_applied": nsp1050_applied,
+        "nsp1051_applied": nsp1051_applied,
+        "nsp1050_open": nsp1050_open,
+        "nsp1051_open": nsp1051_open,
+        "near_miss_legs_open": open_items("BL-112", "BL-113"),
+        "cross_payer_legs_open": open_items("BL-114", "BL-115"),
+        "nsp1052_open": str(store.receivable("NSP-1052").open_balance),
+        "nsp1053_open": str(store.receivable("NSP-1053").open_balance),
+    }
 
 
 def rematch_scenarios() -> dict[str, dict]:
@@ -1056,10 +1162,52 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                     september_close["pack"]["control_roll"]["closing_suspense"],
                 "cash_received_in_month": roll["cash_received_in_month"],
                 "received_into_suspense": roll["received_into_suspense"],
+                "applied_from_suspense": roll["applied_from_suspense"],
                 "closing_suspense": roll["closing_suspense"],
                 "footed": roll["footed"],
                 "payable_ledger_footed": export["pack"]["return_premiums"]["footed"],
+                "combination_settlements":
+                    export["pack"]["combination_settlements"]["settled_total"],
             }
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "non_premium":
+            from cash_recon.nonpremium import disposition_for_line, non_premium_ledger
+
+            disp = disposition_for_line(store, case)
+            ledger = non_premium_ledger(store)
+            observed = {
+                "kind": disp["kind"] if disp else None,
+                "pack_id": disp["pack_id"] if disp else None,
+                "no_suspense_item": not any(
+                    i.bank_line_id == case for i in store.suspense_items()
+                ),
+                "no_allocations": not any(
+                    a.bank_line_id == case for a in store.allocations()
+                ),
+                "ledger_posted": bool(disp) and any(
+                    item["bank_line_id"] == case and item["status"] == "approved"
+                    for item in ledger["items"]
+                ),
+            }
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "combinations":
+            observed = combinations_observed(store)
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()

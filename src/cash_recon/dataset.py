@@ -401,6 +401,7 @@ class OctoberDataset:
     renewals: dict[str, dict]                   # policy -> {installments, term_start, term_end}
     bank_lines: list[BankLine]
     gold: dict[str, GoldOutcome]
+    non_premium_gold: dict[str, str] = field(default_factory=dict)  # line -> sub-kind
 
 
 def _term_policy(number: str, insured: str, broker_id: str | None, premium: Decimal) -> Receivable:
@@ -426,6 +427,11 @@ def build_october_dataset() -> OctoberDataset:
         _term_policy("NSP-1047", "Bayside Chandlery", "BRK-FERN", D("6400.00")),
         _term_policy("NSP-1049", "Tallow & Wick Chandlers", "BRK-FERN", D("5000.00")),
         _term_policy("NSP-1048", "Wexford Tutoring LLC", None, D("3150.00")),
+        _term_policy("NSP-1050", "Kestrel Point Marina", "BRK-GABLE", D("6000.00")),
+        _term_policy("NSP-1051", "Halloran Freight Lines", "BRK-FERN", D("10000.00")),
+        _term_policy("NSP-1052", "Pemberton Antique Auctions", "BRK-BAYLINE", D("5000.00")),
+        _term_policy("NSP-1053", "Lowmarsh Oyster Farms", "BRK-COPPER", D("4000.00")),
+        _term_policy("NSP-1054", "Northgate Builders LLC", None, D("6200.00")),
     ]
     renewals = {
         "NSP-1003": {
@@ -474,6 +480,83 @@ def build_october_dataset() -> OctoberDataset:
         # the contracted one. Netting mismatch; the cash is held.
         BankLine(bank_line_id="BL-104", value_date=date(2026, 10, 22), amount=D("4250.00"),
                  payer_name=fern, reference="NSP-1049", narrative="", source="dataset"),
+        # Oct 6 — Gable pays NSP-1050's bill in two wires, weeks
+        # apart, neither carrying a reference: 2,900.00 now, the
+        # balance on Oct 27. Alone, each is unidentified (neither
+        # foots any subset of Gable's open items); together they
+        # are the bill's net due at Gable's 9% exactly — the
+        # combination pass's planted proof.
+        BankLine(bank_line_id="BL-108", value_date=date(2026, 10, 6), amount=D("2900.00"),
+                 payer_name="Gable & Rowe Brokers", reference=None,
+                 narrative="premium part payment", source="dataset"),
+        # Oct 8 — Fernway's first wire for NSP-1051, sent before the
+        # rate change: a 4,200.00 gross share netted at the 11% in
+        # force. It settles nothing alone; the second wire (Oct 22)
+        # is netted at the NEW 13% — the pair straddles the change,
+        # and only per-leg pricing proves it.
+        BankLine(bank_line_id="BL-110", value_date=date(2026, 10, 8), amount=D("3738.00"),
+                 payer_name=fern, reference=None,
+                 narrative="premium part payment", source="dataset"),
+        # Oct 9 — Bayline's first wire for NSP-1052. With BL-113 it
+        # is a near miss: the pair prices to 4,999.99 of billed
+        # premium, one cent short of the 5,000.00 bill, so no
+        # combination may be proposed and both wires stay open.
+        BankLine(bank_line_id="BL-112", value_date=date(2026, 10, 9), amount=D("2000.00"),
+                 payer_name="Bayline Risk Partners", reference=None,
+                 narrative="premium part payment", source="dataset"),
+        # Oct 12 — Alder sends 1,700.00 with no reference. With
+        # BL-115 it sums exactly to NSP-1053's net due — but
+        # BL-115 is Harborlight's wire and NSP-1053 sits on
+        # Copperline's book: an exact sum across payers is not a
+        # settlement, and neither wire may be combined.
+        BankLine(bank_line_id="BL-114", value_date=date(2026, 10, 12), amount=D("1700.00"),
+                 payer_name="Alder & Voss Insurance Brokers", reference=None,
+                 narrative="premium payment", source="dataset"),
+        # Oct 15 — not premium at all: interest on the premium
+        # trust account, from the bank. The classifier routes it
+        # to a disposition pack; it never enters suspense.
+        BankLine(bank_line_id="BL-116", value_date=date(2026, 10, 15), amount=D("312.44"),
+                 payer_name="Northgate Bank", reference=None,
+                 narrative="Interest credit — premium trust account", source="dataset"),
+        # Oct 16 — the carrier's own money moving between its own
+        # accounts. An own transfer, not premium.
+        BankLine(bank_line_id="BL-117", value_date=date(2026, 10, 16), amount=D("50000.00"),
+                 payer_name="Northgate Specialty Insurance", reference=None,
+                 narrative="Transfer in — operating account 4471 to premium trust",
+                 source="dataset"),
+        # Oct 19 — Harborlight's 1,700.00: the other half of the
+        # cross-payer near-proof above. It must stay unidentified.
+        BankLine(bank_line_id="BL-115", value_date=date(2026, 10, 19), amount=D("1700.00"),
+                 payer_name="Harborlight Insurance Advisors", reference=None,
+                 narrative="premium payment", source="dataset"),
+        # Oct 22 — Fernway's second wire for NSP-1051: the remaining
+        # 5,800.00 of billed premium netted at the new 13%: 5,046.00.
+        # The combination pass can now prove the pair.
+        BankLine(bank_line_id="BL-111", value_date=date(2026, 10, 22), amount=D("5046.00"),
+                 payer_name=fern, reference=None,
+                 narrative="premium part payment — balance", source="dataset"),
+        # Oct 23 — Bayline's second near-miss wire for NSP-1052:
+        # 2,499.99. The cent matters; see BL-112.
+        BankLine(bank_line_id="BL-113", value_date=date(2026, 10, 23), amount=D("2499.99"),
+                 payer_name="Bayline Risk Partners", reference=None,
+                 narrative="premium part payment — balance", source="dataset"),
+        # Oct 27 — Gable's second wire for NSP-1050: 2,560.00. The
+        # pair with BL-108 completes the bill's net due exactly.
+        BankLine(bank_line_id="BL-109", value_date=date(2026, 10, 27), amount=D("2560.00"),
+                 payer_name="Gable & Rowe Brokers", reference=None,
+                 narrative="premium part payment — balance", source="dataset"),
+        # Oct 29 — the bank rebates a service fee it charged the
+        # trust account in error. A bank fee line, not premium.
+        BankLine(bank_line_id="BL-118", value_date=date(2026, 10, 29), amount=D("85.00"),
+                 payer_name="Northgate Bank", reference=None,
+                 narrative="Fee rebate — premium trust account", source="dataset"),
+        # Oct 30 — the lookalike: an insured whose name merely
+        # resembles the carrier pays its premium in full. The
+        # classifier's payer match is exact, so this is premium
+        # and settles T1 like any other direct payment.
+        BankLine(bank_line_id="BL-119", value_date=date(2026, 10, 30), amount=D("6200.00"),
+                 payer_name="Northgate Builders LLC", reference="NSP-1054",
+                 narrative="premium in full", source="dataset"),
     ]
     gold = {
         "BL-107": GoldOutcome(tier="T1_EXACT", allocations={"NSP-1048": "3150.00"}),
@@ -484,7 +567,25 @@ def build_october_dataset() -> OctoberDataset:
         "BL-103": GoldOutcome(tier="T3_REFERENCE", exceptions=["OVERPAID"],
                               allocations={"NSP-1047": "5568.00"}, suspense="128.00"),
         "BL-104": GoldOutcome(exceptions=["NETTING_MISMATCH"], suspense="4250.00"),
+        # The combination wires: per line, each is honestly
+        # unidentified — neither foots any subset of its payer's
+        # open items alone, and the tiers are not asked to see
+        # pairs. What the pair proves together is scored by the
+        # combinations case in the eval set, not here.
+        "BL-108": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="2900.00"),
+        "BL-109": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="2560.00"),
+        "BL-110": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="3738.00"),
+        "BL-111": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="5046.00"),
+        "BL-112": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="2000.00"),
+        "BL-113": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="2499.99"),
+        "BL-114": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="1700.00"),
+        "BL-115": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="1700.00"),
+        # The lookalike premium payment: exact T1, in full.
+        "BL-119": GoldOutcome(tier="T1_EXACT", allocations={"NSP-1054": "6200.00"}),
     }
     bank_lines.sort(key=lambda b: (b.value_date, b.bank_line_id))
     return OctoberDataset(brokers=[fernway], new_receivables=new_receivables,
-                          renewals=renewals, bank_lines=bank_lines, gold=gold)
+                          renewals=renewals, bank_lines=bank_lines, gold=gold,
+                          non_premium_gold={"BL-116": "INTEREST",
+                                            "BL-117": "OWN_TRANSFER",
+                                            "BL-118": "BANK_FEE"})
