@@ -67,7 +67,8 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (42 cases, gold by construction)
+make evals       # the golden-case gate (67 cases, gold by construction)
+make evals-live  # the live reading set — needs a provider key (SKIPPED-LIVE without one)
 make serve       # API + console on http://localhost:8000
 ```
 
@@ -142,6 +143,73 @@ therefore reprices nothing retroactively: earlier cash keeps the
 rate it was matched under, later cash nets at the new rate, and a
 wire netted at a superseded rate is judged against the rate in
 force, not the one the broker used.
+
+## Combination settlements
+
+The tiers work one bank line at a time, and a payer who settles a
+bill in two wires defeats them honestly: neither wire equals
+anything due, and each lands in suspense as UNIDENTIFIED. A
+**combination pass** (`combinations.py`) runs after the tiers — at
+the end of every day run, and again at the end of the suspense
+re-match — and looks for pairs the code can prove:
+
+- both legs are wholly unapplied cash of the **same payer** (an
+  open suspense item holding a whole bank line; a line carrying a
+  suspected DUPLICATE_PAYMENT is never a leg);
+- the target is one open installment on that payer's own book;
+- each leg is priced at the commission rate in force on **its own
+  value date** — the gate's gross-up arithmetic, so a pair can
+  straddle a rate change — and the two priced values sum to the
+  installment's open billed balance **exactly, to the cent**.
+
+A proven pair becomes a proposal in a `PACK-COMB-<date>` pack at
+the same human gate, both legs itemised (line, date, amount, the
+rate each was priced at). Approval applies both legs atomically:
+the gate re-verifies the pair against the installment's standing
+balance before writing anything, and refuses the pack whole if the
+books have moved. Rejection frees the legs — their suspense items
+re-open and the pair can be proposed again. Combination entries
+cannot be edited at the gate: a pair settles exactly as proposed,
+together, or not at all. The search is bounded and says so: pairs
+only (never triples), same-payer wholly-unapplied legs only, at
+most 12 legs considered per payer. October plants the proofs: two
+bills settled by wire pairs weeks apart (one straddling Fernway's
+rate change), a pair one cent short that must not be proposed, and
+an exact sum across two different payers that must not be proposed
+either. The day report and the close pack account for combination
+settlements as their own section; the footing identity is
+unchanged, to the cent.
+
+## Non-premium lines
+
+Not every credit on the statement is premium. The bank rebates a
+fee, the trust account earns interest, the carrier moves its own
+money between its own accounts. Sent through the tiers, those
+lines land in UNIDENTIFIED suspense and pollute the aging auditors
+watch — so before the tiers, a **code-first classifier**
+(`nonpremium.py`, rules in `config.py`) marks a line
+**NON_PREMIUM** with a sub-kind — `BANK_FEE`, `INTEREST`,
+`OWN_TRANSFER`, `OTHER_NON_PREMIUM` — and routes it out of the
+premium pipeline into a disposition pack (`NPACK-<date>`) at the
+same gate: named approver, self-approval refused, decided like
+everything else. Approval posts the line to a **non-premium ledger
+view** (`GET /api/non-premium`, `cash-recon non-premium`); it
+never touches a receivable and never enters suspense aging.
+
+The classifier is deliberately conservative: a rule fires only
+when **every** field it names matches exactly — the payer
+comparison is against the whole normalised payer name, so an
+insured called "Northgate Builders LLC" paying real premium is
+not the carrier, and a bank line whose narrative names no rule's
+text is not classified either. Anything ambiguous stays
+UNIDENTIFIED suspense exactly as before, and the model never
+classifies these lines: classification is a config lookup, not a
+judgment. The day report carries a non-premium section and the
+footing identity gains the term (bank == applied + netted +
+suspense + non-premium dispositions); the close pack carries the
+month's non-premium totals by sub-kind. October plants an interest
+credit, an own-account transfer, a fee rebate — and the lookalike
+premium payment that must not be classified away.
 
 ## Installments, worked one by one
 
@@ -475,7 +543,7 @@ system being awake.
 ## Evals
 
 `make evals` runs the synthetic months through the real pipeline and
-scores 54 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 67 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
@@ -507,12 +575,48 @@ completely, foots, regenerates byte-identically, and changes
 nothing; a plain T1 line exports minimally but completely), and
 the trend case (both months' bank and allocated values foot to
 the day reports, suspense received agrees with both close packs,
-and the watch compares the two months by name). The runner prints a
+and the watch compares the two months by name), the combination
+cases (October's two wire-pair settlements proposed and applied to
+the cent — one straddling the rate change — with the cent-short
+near miss and the cross-payer exact sum both left open and
+unproposed), and the non-premium cases (the interest credit, the
+own-account transfer and the fee rebate each classified to the
+right sub-kind, standing in approved disposition packs, with no
+suspense item and no allocation; the lookalike premium payment
+settling as ordinary T1 premium). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
 book. When matching gets a case wrong in a new way, the case goes
 into the set first, then the behaviour changes.
+
+### The live reading set
+
+The golden gate cannot measure the one job the model actually does
+here — reading a broker's free-form remittance advice — because
+the offline fallback reads the synthetic text layer the dataset is
+written in. `evals/live_cases.jsonl` is the instrument for that
+job: deliberately messy advices (a rambling email with comma
+amounts; a line whose policy reference is missing — only the
+numbered line is gold; a ragged table paying one policy twice; an
+injection attempt that must be fenced by the document screen
+before any reader sees it) and two lump sums (one explainable only
+by reaching across two brokers' books, which must be refused; one
+with exactly one exact same-broker explanation). Run it with a
+provider configured — the same environment variables as the
+service:
+
+```bash
+make evals-live    # or: uv run python evals/run_live_evals.py
+```
+
+The runner prints extraction accuracy per case and exits non-zero
+on any failure. With **no** provider configured it prints
+`SKIPPED-LIVE` and exits 0: a deliberate non-result, never a fake
+pass, and the standard gate above neither includes nor depends on
+this set. Until a key is available, the honest state is that the
+model's reading is unmeasured — the adapters are tested with
+stubbed transports, and this set is what a first live run grades.
 
 ## Layout
 
@@ -520,9 +624,11 @@ into the set first, then the behaviour changes.
 src/cash_recon/
   models.py      the records: brokers, receivables, bank lines, packs
   money.py       Decimal money, the one rounding point
-  config.py      policy thresholds (auto-apply, write-off limit, stale age) + the trend watch's tolerances
+  config.py      policy thresholds (auto-apply, write-off limit, stale age) + the trend watch's tolerances + the non-premium rules
   dataset.py     the synthetic Northgate months (September + October), gold by construction
   matcher.py     the five tiers, in code, with the footing assertion
+  combinations.py  the combination pass: same-payer wire pairs that settle one bill exactly
+  nonpremium.py  the non-premium classifier + disposition packs + the ledger view
   llm.py         the model port: reader, proposer, note drafter
   documents.py   the document screen + near-duplicate detection
   gate.py        packs, approvals, entry edits, write-offs, the posting file
@@ -544,18 +650,20 @@ src/cash_recon/
   api.py         FastAPI: health, run, gate, reports, console
   static/        the console (one HTML file, no dependencies)
 migrations/      numbered SQL migrations (PostgreSQL) + sqlite/ (SQLite dialect)
-evals/           the golden-case runner + golden.jsonl
+evals/           the golden-case runner + golden.jsonl; the live reading set (live_cases.jsonl + run_live_evals.py)
 tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 ```
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 155 tests,
-54/54 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 179 tests,
+67/67 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
-stubbed transports, and the offline fallback is what the demo and the
-evals exercise. Hands-on local testing by our team is the remaining
+stubbed transports, the offline fallback is what the demo and the
+golden evals exercise, and the live reading set (above) stands ready
+to grade a real model the day a key is configured; until then it
+reports SKIPPED-LIVE, honestly unmeasured. Hands-on local testing by our team is the remaining
 step (see the work-in-progress note above).
 
 ## License

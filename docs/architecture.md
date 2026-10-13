@@ -403,6 +403,78 @@ Provider selection is `LLM_BACKEND`
 Store selection is `DATABASE_URL` (PostgreSQL) or `SQLITE_PATH`
 (SQLite file, default `data/cashrecon.db`) — an env change only.
 
+## Combination settlements
+
+The per-line tiers are deliberately single-line: their refusals are
+what make their matches trustworthy. The cost is a real pattern —
+a payer settling one bill in two wires — landing both wires in
+suspense. The combination pass (`combinations.py`) is the governed
+second look, placed *after* the tiers (a day-run graph node between
+assemble and sweep, and a closing step of the re-match pass) so it
+never competes with a per-line explanation: it only reads
+wholly-unapplied suspense the tiers already failed to explain.
+
+Three design choices carry the weight. **Per-leg pricing:** a
+pair's proof grosses each leg up at the commission rate in force on
+that leg's own value date — the gate's `_apply` arithmetic run in
+advance — so a pair straddling a rate change is provable, and the
+gate applies each leg at the rate it was proposed at, not the pack
+date's rate (the one exception to the pack-date rule, recorded on
+the entry). **Proposal-time suspense resolution:** a leg's item is
+held resolved from the moment the pair is proposed, mirroring the
+re-match recovery discipline — the day footing counts allocations
+from saved pack records regardless of gate state, so holding the
+item open would double-count the cash; the price is that a
+proposed-but-undecided pair's cash sits outside the aging buckets,
+which the day report answers by itemising the combination section
+by pack status. **Rejection frees the legs:** the gate re-opens a
+rejected combination's items with their original received dates,
+and the leg test counts allocations only from packs that have not
+been rejected, so a refused pair is proposable again — while the
+gate's approval path re-verifies the pair against the target's
+standing balance and refuses the whole pack, untouched, if the
+books moved since proposal. Combination entries are uneditable at
+the gate by construction: an editable "exact proof" is not a proof.
+The search bound (pairs only, ≤12 legs per payer, same payer only,
+suspected duplicates never legs) is a stated limit, not an
+oversight: wider combination search is exponential, ambiguous, and
+belongs to a human working the workbench.
+
+## Non-premium lines
+
+Classification is placed *before* the tiers, in the match node, and
+is a pure config lookup (`NON_PREMIUM_RULES` in `config.py`): every
+field a rule names must match, the payer comparison is whole-name
+after normalisation. The conservatism is the design — the failure
+mode being defended against is not an unclassified fee (it ages in
+suspense, visible, recoverable) but a premium payment classified
+away (invisible, unrecoverable without an audit), so the rules
+accept only the carrier's own name as payer, and the bank's name
+paired with a fee/interest narrative. Dispositions reuse
+`PostingPack` rather than a parallel record: the gate's
+self-approval refusal, second-approver rule, rejection reasons,
+posting file, webhook events and audit trail all apply unchanged,
+and the "ledger" is a read model over those packs, so there is one
+gate implementation in the system, not two. The day footing gains
+the non-premium term only additively — the note text is unchanged
+on days with no dispositions, because existing readers (and the
+golden set) pin it.
+
+## The live reading set
+
+`evals/run_live_evals.py` exists because the golden gate has a
+structural blind spot: it runs the offline fallback, which reads
+the synthetic text layer, so it can never fail the way a real model
+fails on a messy advice. The live set grades the reader port
+directly (screen → read for advices; the matcher's
+candidate discipline → propose for lump sums) against gold written
+by construction, and reports per-case extraction accuracy. Its
+skip behaviour is part of the design: no provider configured means
+SKIPPED-LIVE with exit 0 — CI stays green, and nobody can mistake
+the absence of a measurement for a measurement. It is kept out of
+`make evals` for the same reason: the standard gate must be
+runnable by anyone who clones the repo, with no key.
+
 ## What v1 deliberately does not do
 
 No live bank feeds (statements arrive as files and are imported;
