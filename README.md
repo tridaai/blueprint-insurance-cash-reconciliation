@@ -67,7 +67,7 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (73 cases, gold by construction)
+make evals       # the golden-case gate (76 cases, gold by construction)
 make evals-live  # the live reading set — needs a provider key (SKIPPED-LIVE without one)
 make serve       # API + console on http://localhost:8000
 make prod-smoke  # prove the production profile against real PostgreSQL + S3 (env required)
@@ -458,7 +458,9 @@ A posting pack is assembled per day by a named person and approved by
 a **different** named person — self-approval is refused in code.
 Delta write-offs above the configured single-approver limit
 (`WRITE_OFF_SINGLE_LIMIT`, default 250.00) need a second approver,
-different again. Exact T1 matches at or below
+different again. A suspense disposition pack is stricter than
+either: it always needs two approvers, and the assembler can be
+neither of them (next section). Exact T1 matches at or below
 `AUTO_APPLY_THRESHOLD` (default 500.00) are marked auto-appliable —
 still listed on the pack and the day's report. Approval is the only
 moment receivables change, and every applied cent keeps its trace:
@@ -473,6 +475,69 @@ original it replaced, and the edit is refused whole if any bank
 line's entries would stop summing to the total they summed to
 before: an edit redistributes a line's cash, it does not create or
 destroy any. Decided packs cannot be edited; they are history.
+
+## Suspense disposition
+
+Every path out of suspense so far applies cash or returns it.
+Some cash is never identified — the payer cannot be found, the
+trail is cold — and a real desk cannot carry it as open work
+forever. Disposition is the governed end of that lifecycle (the
+console's Suspense tab, `GET /api/suspense/dispositions`,
+`POST /api/suspense/dispositions/assemble`,
+`GET /api/suspense/disposition-ledger`, `cash-recon
+dispose-candidates` / `dispose-assemble` / `dispositions`).
+
+**Eligibility is code.** An item may be proposed only when it is
+open, **wholly unapplied**, and aged at or beyond
+`SUSPENSE_DISPOSITION_MIN_AGE_DAYS` (default **90** — deliberately
+beyond the 30-day stale marker: stale is a prompt to work an item;
+disposition is the desk admitting the work is done). Three
+blockers refuse the proposal in words, naming themselves: a
+standing undecided **resolution docket** (the gate decides that
+hypothesis first), a standing undecided disposition pack (one
+docket per item), and an **open return chain** — the bank has
+taken part of the item's line back and may take more, so the
+line's story is not finished. A partially applied item is refused
+the same way: its remainder belongs to the re-match pass and the
+workbench, not to disposition.
+
+**The act.** A named assembler proposes a `PACK-DISPOSE-<date>`
+pack; each item on it carries a **kind** and the assembler's
+**written reason** for that item. The kinds are destinations, not
+severities: `WRITE_OFF_INCOME` takes the cash to miscellaneous
+income; `ESCHEAT_REVIEW` moves it to the unclaimed-property
+review list — money owed to someone the desk could not find.
+Approval is **dual control, always**: two approvers, both
+different from the assembler and from each other, whatever the
+amounts — not a threshold rule. Self-approval, a lone approver,
+and the assembler sitting in either approver's chair are each
+refused, and every refusal leaves the books unchanged. The gate
+re-verifies each item still stands open at its proposed amount
+before anything is written; approval then moves the items into
+their disposition state, closes their lines' open exceptions, and
+stamps the full chain — assembler, reason, both approvers, pack —
+on each item's record. The pack's posting file carries the
+dispositions as rows a human posts from: write-offs to income,
+escheat reviews to the unclaimed-property holding. Rejection
+leaves the items open and aging, and they can be proposed again.
+
+**The books keep the term.** Dispositioned cash leaves the
+suspense identity through its own term: the close pack roll is
+now opening + received − applied − returned − **disposed** =
+closing, per currency, with the disposed term **split by kind**
+— write-off income and escheat review are never blended, because
+only one of them is income. The day report for the decision day
+names the dispositions with their kinds and reasons; suspense
+aging stops counting an item the day it is decided; the trend
+watch counts a disposition as a **resolution outcome** for dwell
+(the item's days run from receipt to its disposition date); and
+a dispositioned line's audit export foots with the disposition as
+a named term and the disposition as the line's final state.
+Escheat-review items stay **visible** on their own read-model
+list (`disposition_ledger`'s escheat list, the console's Suspense
+tab) with the full chain beside the money. Disposition is a
+state, never a deletion: nothing about the item — amount,
+received date, reason, chain — is removed.
 
 ## Returned payments
 
@@ -612,7 +677,8 @@ The month gets the control the day gets, at period scale (console
 Month close tab, `GET /api/close/{YYYY-MM}` + `/text`,
 `cash-recon close`). The control roll runs over the suspense
 ledger: opening suspense (aged, by bucket) + cash received into
-suspense in the month − applied from suspense = closing suspense,
+suspense in the month − applied from suspense − returned from
+suspense − disposed from suspense = closing suspense,
 with every item's position reconstructed from the records so the
 closing figure cross-checks against the ledger itself. If the two
 disagree, or an item cannot be traced to a bank line, the pack says
@@ -841,7 +907,7 @@ whatever the workbench has done with them. So:
 
 The run's LangGraph checkpoints are the third lifecycle concern:
 every run appends a chain of them, and the saver's tables grow
-without bound — this repository's own scratch database accumulated
+without bound if nobody prunes them — this repository's own scratch database accumulated
 **126,843 checkpoints and 193,070 pending writes (825 MB)** from
 test and demo runs alone. Checkpoints are the graph's scratch
 memory, not the books, so the tail is cut under a governed
@@ -883,7 +949,7 @@ references.
 ## Evals
 
 `make evals` runs the synthetic months through the real pipeline and
-scores 73 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 76 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
@@ -938,7 +1004,14 @@ resolved by its own mangled narrative, an amount two brokers'
 rates both explain where only the narrative disambiguates — the
 wrong-broker candidate present and bare — a wire with no
 defensible candidate whose assembly refuses in words, and a
-rejected docket whose candidates stay on its record), and the
+rejected docket whose candidates stay on its record), the
+disposition cases in small worlds of their own (an aged item
+written off under dual control with the close footing through its
+disposed term, an escheat-review item listed but never counted as
+income, and the refusal matrix — too young, self-approval, a
+single approver, the assembler as second approver, a standing
+resolution docket, a partially applied item, an open return chain
+— each refused with the books unchanged), and the
 broker-statement case (the shipped Fernway example statement for
 October reconciles against the pipeline's books with exactly one
 planted row of each class, both footing identities and the bridge
@@ -1008,6 +1081,7 @@ src/cash_recon/
   checkpoints.py checkpoint retention: the governed prune of the LangGraph checkpoint store
   rematch.py     the suspense re-match pass: late information, same tiers, same gate
   resolution.py  the resolution scan: whole-book candidates for unidentified cash, dockets at the gate
+  dispositions.py suspense disposition: eligibility, PACK-DISPOSE packs, the disposition + escheat ledger
   broker_statement.py the broker's own monthly statement: import, classification against the books, footing
   store.py       Postgres (production) / SQLite (local) / in-memory (tests)
   objects.py     S3-compatible document storage
@@ -1021,8 +1095,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 255 tests,
-73/73 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 272 tests,
+76/76 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, the offline fallback is what the demo and the

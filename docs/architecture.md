@@ -469,7 +469,9 @@ run at all against the local profiles it is not proving.
 Policy thresholds live in `config.py` and the environment:
 `AUTO_APPLY_THRESHOLD` (500.00), `WRITE_OFF_SINGLE_LIMIT` (250.00),
 `STALE_SUSPENSE_DAYS` (30), `NETTING_TOLERANCE` (0.01),
-`DUPLICATE_WINDOW_DAYS` (5). The trend watch's tolerances live in
+`DUPLICATE_WINDOW_DAYS` (5), `SUSPENSE_DISPOSITION_MIN_AGE_DAYS`
+(90 — the age at which unapplied cash may be proposed for
+disposition). The trend watch's tolerances live in
 the same module (`WatchPolicy`): `WATCH_AUTO_RATE_DROP_POINTS`
 (0.05), `WATCH_EXCEPTION_SHARE_DOUBLING_FACTOR` (2),
 `WATCH_EXCEPTION_SHARE_FLOOR` (0.01),
@@ -568,7 +570,8 @@ for the claim and exactly one for the lock.
 The checkpointer is the graph's scratch memory: a chain of state
 snapshots per run, in the saver's own tables (`checkpoints` /
 `writes` on SQLite; `checkpoints` / `checkpoint_blobs` /
-`checkpoint_writes` on Postgres). Nothing trims it — measured on
+`checkpoint_writes` on Postgres). Left alone, nothing trims it —
+measured on
 this repository's own scratch database: 126,843 checkpoints
 across 36 threads, 825 MB, from test and demo runs. The retention
 policy (`checkpoints.py`) keeps the newest
@@ -737,6 +740,73 @@ naming the conflict pack). Resolution packs accept no entry edits
 and no write-offs: the approver chooses a candidate as scanned,
 or the pack is rejected and the item re-scanned against the books
 as they then stand.
+
+## Suspense disposition
+
+The suspense lifecycle's last exit (`dispositions.py`): cash that
+aged past every attempt to identify it leaves open suspense
+without settling a policy — written off to miscellaneous income
+(`WRITE_OFF_INCOME`) or moved to escheat review
+(`ESCHEAT_REVIEW`). The shape follows the resolution precedent —
+a `PostingPack` carrying metadata (`pack.disposition`: per item,
+the kind and the assembler's written reason) and no entries — but
+the governance is the strictest in the system, because this is
+the one act that removes cash from the desk's open work on the
+desk's own say-so.
+
+Eligibility is a code function returning blockers in words:
+the item must be open, its bank line on the books, **wholly
+unapplied** (its amount is the whole line, and no non-rejected
+pack allocates the line), and aged at or beyond
+`SUSPENSE_DISPOSITION_MIN_AGE_DAYS` (default 90, beyond the
+30-day stale marker by design). Three standing states block it:
+an open **return chain** on the line (returns recorded that do
+not yet sum to the line — the bank's clawback story is
+unfinished), an undecided **resolution docket**, and an
+undecided disposition pack (one standing docket per item,
+either kind). Assembly refuses on the first blocker, naming the
+item; the items stay open while the pack stands proposed — a
+proposal is not a claim on the cash.
+
+Approval is **dual control, always**: a second approver is
+required for every disposition pack regardless of amount, and
+the second approver must differ from both the first approver
+and the assembler (the gate's self-approval rule already bars
+the assembler from the first chair). This is a class rule, not
+the write-off threshold rule — it sits beside it in
+`approve_pack` and fires first for this pack class. Approval
+re-verifies every item (still open, still at its proposed
+amount) before writing, then stamps the item: status
+`dispositioned`, the kind, the pack's value date as
+`dispositioned_on`, the pack id, and the assembler's reason; the
+line's open exceptions close with it. Rejection touches nothing
+but the trail. Disposition packs accept no entry edits and no
+write-offs, and their posting file carries the dispositions
+themselves as rows — the income write-offs a human posts, the
+escheat reviews addressed to the unclaimed-property holding.
+No migration was needed: the disposition rides the item and the
+pack as payload, exactly as resolution metadata does.
+
+The books treat the exit as a first-class term, never a silent
+shrinkage. The close pack's position reconstruction closes a
+dispositioned item's position on its `dispositioned_on` — the
+whole remaining position, since eligibility guaranteed nothing
+of it was worked — so the roll gains **disposed_from_suspense**
+per currency, **split by kind** (only the write-off share is
+income), month-end aging drops the item from its decision date,
+and the discrepancy check skips it (its status is no longer
+`open`). Suspense aging filters on `open`, so it follows with no
+code of its own. The day report names the decision day's
+dispositions from packs dated that day; the trend watch's dwell
+and the scorecard's days-unapplied both end an item's clock at
+its disposition date — a disposition is a resolution outcome,
+stated here so the figure's meaning is on the record; and the
+per-line audit export foots with a `suspense_dispositioned` term
+and names the disposition as the line's final state.
+Escheat-review items remain a **separate read-model list** (the
+disposition ledger's `escheat_review`): the state is owed that
+money, so it is presented as an obligation with its full chain —
+never inside the income figure, and never deleted.
 
 ## Non-premium lines
 
