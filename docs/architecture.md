@@ -417,8 +417,10 @@ webhook state (configured or disabled) so an operator can tell
   are applied by the store at startup; `0002` adds the pgvector
   embedding table, `0003` the payment-returns table, `0004` the
   return-premium tables (cancellations, payables, payout packs),
-  `0005` the currency columns and the FX story, and `0006` the
-  day-claims table the run lifecycle stands on.
+  `0005` the currency columns and the FX story, `0006` the
+  day-claims table the run lifecycle stands on, and `0007` the
+  broker-statements table (one standing statement per broker and
+  period, supersession marked on the record).
   The embedding table's `vector(384)` is a contract every store
   enforces in code at `set_embedding` — `EmbeddingDimensionError`,
   naming the expected dimension — so the JSON-backed stores refuse
@@ -619,7 +621,33 @@ and the leg test counts allocations only from packs that have not
 been rejected, so a refused pair is proposable again — while the
 gate's approval path re-verifies the pair against the target's
 standing balance and refuses the whole pack, untouched, if the
-books moved since proposal. Combination entries are uneditable at
+books moved since proposal.
+
+**The rejection residue (found and fixed in round 13).** Freeing
+the legs was only half of rejection. The pass writes the pair's
+allocations into the allocations index at proposal, and the
+original rejection left those rows standing — so every read model
+that counts allocated cash from the index (the day reports'
+by-broker splits, the broker scorecard, the trend watch) counted
+the freed cash twice: once as allocated, once as the re-opened
+suspense, and the leg days stopped footing by exactly the pair's
+total. The month close kept footing, which is what hid it: the
+close reconstructs suspense positions from pack *entries*, and a
+rejected pack's entries already stand outside its applied term.
+The fix follows the repo's own precedents rather than inventing a
+rule. An ordinary or re-match pack's rejection keeps its index
+rows deliberately — it re-opens nothing, the day identity still
+foots, and the line export segregates the refused allocations as
+their own named term. A combination rejection is the one rejection
+that returns cash to suspense, so it is the one that must
+surrender its rows: `reject_pack` now replaces the pack's index
+rows with its non-combination entries (none, by construction) —
+the same `replace_allocations` discipline gate edits already used
+to keep the index describing only packs that stand. The pack
+record keeps its entries (the proposal stays on the gate history),
+the audit export for a leg line foots and names the refused
+allocations as settling nothing, and a reject → re-propose →
+approve cycle applies the pair exactly once. Combination entries are uneditable at
 the gate by construction: an editable "exact proof" is not a proof.
 The search bound (pairs only, ≤12 legs per payer, same payer only,
 suspected duplicates never legs) is a stated limit, not an
@@ -729,6 +757,72 @@ gate implementation in the system, not two. The day footing gains
 the non-premium term only additively — the note text is unchanged
 on days with no dispositions, because existing readers (and the
 golden set) pin it.
+
+## Broker statement reconciliation
+
+Everything above reconciles the carrier's own records against
+each other. A broker statement is the counterparty's version of
+the same month, and `broker_statement.py` checks it against the
+books as a read model — the desk's first way to answer "the
+broker says X" with anything but eyes.
+
+The import mirrors the bank statement import's discipline
+(`statement.py`): parse the whole file, check the trailer
+controls exactly (CONTROL TOTAL over the lines' nets, CONTROL
+COUNT of data rows), refuse the whole import on any failure with
+nothing stored. A statement is one broker and one period, held as
+its own record (`broker_statements`, migration 0007) because the
+reconciliation must cite exactly which statement it read; its id
+is a digest of the file text, so re-import dedupes, and a
+corrected statement supersedes the standing one — the old record
+keeps a `superseded_by` mark, and only the standing statement is
+reconciled.
+
+The books side is cash actually *applied*: the allocations of
+approved packs, attributed to the broker the way the day reports
+attribute it (`report._broker_key`, shared not copied), with each
+allocation's gross delta and expected commission replayed through
+the gate's own arithmetic. The replay is deliberately
+gate-faithful rather than a reuse of the returns replay: returns
+price every entry at the pack date and their totals survive it
+(the settle-in-full cap corrects them), but a commission
+expectation is per allocation and has no such correction, so this
+replay follows the gate's rate selection entry by entry — a
+combination leg or a resolution allocation at the rate in force
+on its bank line's date, an ordinary allocation at its pack's
+value date. Classification per (policy, currency) is then a
+comparison of three figures: AGREED when gross, commission and
+net all agree to the cent; COMMISSION_DIFFERS when the gross
+agrees and the commission is not the contracted rate in force;
+AMOUNT_DIFFERS otherwise, both figures shown; MISSING_ON_BOOKS
+when no cash from the broker was applied to the policy in the
+period; MISSING_ON_STATEMENT for applied cash the statement
+never mentions.
+
+Two boundaries are load-bearing. First, suspense: cash that
+arrived but stands unapplied is the desk's open work, not a
+disagreement with the broker, so it raises no row — a policy whose
+only cash sits in suspense under an open exception (October's
+BL-104, netted at a rate no period carries) is simply absent, and
+the report says why on its face. Second, handling: a row that
+maps to an exception already open on the books names it, and
+assignment and notes happen through the existing workbench —
+the reconciliation adds no handling state of its own, and a
+MISSING_ON_BOOKS row opens no books record at all.
+
+The footing is three identities per currency, all checked, none
+assumed: the statement's classes sum to its net total; the books'
+classes sum to the books total; and posted cash plus what stands
+proposed at the gate plus what stands on rejected packs equals
+the month's by-broker day splits — the bridge that ties this
+report to the same index every other read model reads (with the
+round-13 rule honoured: a rejected combination's surrendered rows
+appear on neither side). Where an identity fails the report says
+NOT FOOTED and names the difference. The close pack cites the
+summary (counts by class, both totals) whenever a statement
+stands for the month — a citation that changes none of the pack's
+identities and is absent on statement-less months, so their packs
+stay byte-identical to what they were.
 
 ## The live reading set
 

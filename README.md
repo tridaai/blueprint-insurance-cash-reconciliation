@@ -67,7 +67,7 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (72 cases, gold by construction)
+make evals       # the golden-case gate (73 cases, gold by construction)
 make evals-live  # the live reading set — needs a provider key (SKIPPED-LIVE without one)
 make serve       # API + console on http://localhost:8000
 make prod-smoke  # prove the production profile against real PostgreSQL + S3 (env required)
@@ -647,7 +647,67 @@ holding more than one currency the suspense roll runs **per
 currency** — the identity holds in each denomination, the headline
 roll is the functional currency's — and the pack carries
 functional equivalents of the closing suspense at month-end
-governed rates, labelled as translations, not postings.
+governed rates, labelled as translations, not postings. And when a
+broker sent a statement for the month, the pack cites the broker
+statement reconciliation for it (next section) — counts by class
+and both totals, under that report's own footing: a citation that
+changes none of the pack's identities, and is absent on a
+statement-less month.
+
+## Broker statement reconciliation
+
+Once a month each broker sends its own statement of what it
+believes it remitted: per policy, the gross it billed, the
+commission it says it took, and the net it says it sent. The desk
+checks that statement against the books here (console Month close
+tab, `POST /api/broker-statements/import`,
+`GET /api/broker-reconciliation/{broker}/{YYYY-MM}` + `/text`,
+`cash-recon import-broker-statement` / `broker-reconciliation`).
+
+The import carries the bank statement import's discipline: the
+file names its broker and period, its trailer CONTROL TOTAL (over
+the lines' nets) and CONTROL COUNT must match exactly, and any
+failure — a tampered total, a bad row, a broker the desk has no
+record for — refuses the whole import with nothing stored.
+Re-importing the same file dedupes (the statement's id is a digest
+of its text); a corrected statement supersedes the standing one,
+which stays on the record marked with what replaced it.
+
+Every statement line is then classified against the cash the books
+actually applied for that broker in the period — the allocations
+of approved packs, each one's gross replayed at the rate the gate
+itself priced it at, so a mid-month rate change is judged by the
+rate in force for the cash, not the rate in force today:
+
+- **AGREED** — gross, commission and net all agree with the books,
+  to the cent.
+- **COMMISSION_DIFFERS** — the gross agrees; the commission the
+  broker took is not the contracted rate in force. A broker
+  applying its new rate retroactively is the planted example.
+- **AMOUNT_DIFFERS** — the policy matches, but the gross or the
+  net does not; both figures are shown.
+- **MISSING_ON_BOOKS** — the broker says it paid; no cash from
+  this broker was applied to the policy in the period.
+- **MISSING_ON_STATEMENT** — the books applied this broker's cash
+  in the period; the statement never mentions the policy.
+
+The boundary is applied cash, stated plainly: cash a broker sent
+that still stands unapplied in suspense is the desk's open work,
+not a disagreement with the broker — it raises no row here, and
+is reconciled where it lives, in the suspense aging and the close
+pack. Totals foot per currency: the statement's net total is the
+sum of its classes, the books total is the sum of its classes, and
+posted cash plus what stands proposed at the gate and on rejected
+packs equals the month's by-broker day splits — or the report says
+NOT FOOTED and names the difference. A row that maps to an
+exception already open on the books names it, with its assignee;
+assignment and notes happen in the workbench, exactly as for any
+other exception, and a MISSING_ON_BOOKS row opens nothing — the
+claim is reported and exportable (one JSON plus a text rendering,
+SHA-256 digested, byte-identical on regeneration), and that is
+all. `examples/example-broker-statement.csv` is Fernway's October
+statement with one planted row of each class; the eval gate
+reconciles it against the real books.
 
 ## The broker scorecard
 
@@ -823,7 +883,7 @@ references.
 ## Evals
 
 `make evals` runs the synthetic months through the real pipeline and
-scores 72 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 73 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
@@ -878,7 +938,12 @@ resolved by its own mangled narrative, an amount two brokers'
 rates both explain where only the narrative disambiguates — the
 wrong-broker candidate present and bare — a wire with no
 defensible candidate whose assembly refuses in words, and a
-rejected docket whose candidates stay on its record). The runner prints a
+rejected docket whose candidates stay on its record), and the
+broker-statement case (the shipped Fernway example statement for
+October reconciles against the pipeline's books with exactly one
+planted row of each class, both footing identities and the bridge
+to the month's day splits pinned, BL-104's suspense cash raising
+no row, and a tampered control total refused whole). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
@@ -943,19 +1008,21 @@ src/cash_recon/
   checkpoints.py checkpoint retention: the governed prune of the LangGraph checkpoint store
   rematch.py     the suspense re-match pass: late information, same tiers, same gate
   resolution.py  the resolution scan: whole-book candidates for unidentified cash, dockets at the gate
+  broker_statement.py the broker's own monthly statement: import, classification against the books, footing
   store.py       Postgres (production) / SQLite (local) / in-memory (tests)
   objects.py     S3-compatible document storage
   api.py         FastAPI: health, run, gate, reports, console
   static/        the console (one HTML file, no dependencies)
 migrations/      numbered SQL migrations (PostgreSQL) + sqlite/ (SQLite dialect)
 evals/           the golden-case runner + golden.jsonl; the live reading set (live_cases.jsonl + run_live_evals.py)
+examples/        the shipped example broker statement (Fernway, October — one planted row of each class)
 tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 ```
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 238 tests,
-72/72 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 255 tests,
+73/73 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, the offline fallback is what the demo and the
