@@ -148,6 +148,8 @@
       <span class="note">Re-runs the tiers for unapplied cash against everything now on the books — late advices, later-booked policies. Recoveries land in a re-match pack at the gate; nothing posts here.</span>
     </div>
     <div id="rematch-result"></div>
+    <p class="note">Unidentified cash — a wire nobody can attribute — can also be worked by a resolution scan: it reads the whole book for readings of the amount that foot exactly, or that the line's own text evidences, and puts them to the gate as a docket of alternates. The scan proposes; only an approver choosing one candidate applies anything.</p>
+    <div id="resolution-result"></div>
     <div id="suspense"></div>
   </section>
   <section id="tab-packs" class="hidden">
@@ -470,7 +472,41 @@ async function loadSuspense() {
   $("suspense").innerHTML = buckets.map(b => `<h3>${b.bucket} — ${money(b.total)} (${b.count})</h3>` +
     table([{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
            {key: "received_date", label: "Received"}, {key: "age_days", label: "Age (days)", num: 1}, {key: "reason", label: "Reason"},
-           {label: "Audit", render: r => `<a href="/api/bank-lines/${encodeURIComponent(r.bank_line_id)}/audit-export/text" target="_blank">export ↗</a>`}], b.items)).join("");
+           {label: "Audit", render: r => `<a href="/api/bank-lines/${encodeURIComponent(r.bank_line_id)}/audit-export/text" target="_blank">export ↗</a>`},
+           {label: "Resolve", render: r => r.reason === "UNIDENTIFIED" ? `<button class="ghost" onclick="scanResolution('${r.suspense_id}')" style="font:inherit;padding:4px 9px;border:1px solid var(--accent);border-radius:8px;background:#fff;color:var(--accent);cursor:pointer">Scan for candidates</button>` : ""}], b.items)).join("");
+}
+async function scanResolution(suspenseId) {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — a resolution scan is a named act.");
+  try {
+    const r = await api(`/api/suspense/${encodeURIComponent(suspenseId)}/scan`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({actor: name, as_of: $("day").value})});
+    const decidable = r.candidates.filter(c => !c.flags.length);
+    $("resolution-result").innerHTML = `<h4>Resolution scan — ${suspenseId} (${money(r.amount)} ${r.currency})</h4>
+      <p class="note">Scan: ${r.scan_backend}${r.model_ranked ? "" : " — deterministic only, labelled heuristic"}. ${decidable.length} decidable candidate(s) of ${r.candidates.length} on the record. Nothing is applied by a scan; candidates settle only when an approver chooses one at the gate.</p>` +
+      (r.candidates.length ? table(
+        [{key: "candidate_id", label: "Candidate"},
+         {key: "policy_number", label: "Policy"},
+         {key: "interpretation", label: "Reading"},
+         {label: "Arithmetic", render: c => c.arithmetic},
+         {label: "Evidence", render: c => c.evidence ? `“${c.evidence}” (${c.evidence_kind.replace("_", " ")})` : "—"},
+         {label: "Model", render: c => c.model_rank ? `#${c.model_rank} — ${c.model_explanation || ""}` : (c.proposed_by !== "resolution_scan" ? `added by ${c.proposed_by}` : "")},
+         {label: "Flags", render: c => (c.flags || []).join(", ") || "—"}], r.candidates) : "<p class='note'>No candidate: no exact arithmetic and no verbatim evidence anywhere on the book. The cash stays in suspense.</p>") +
+      (decidable.length ? `<p><button onclick="assembleResolution('${suspenseId}')">Assemble resolution pack</button></p>` : "");
+    setStatus(`Scan recorded for ${suspenseId}: ${r.candidates.length} candidate(s).`);
+  } catch (e) { setStatus("Scan refused: " + e.message); }
+}
+async function assembleResolution(suspenseId) {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — a resolution pack is assembled by a named person.");
+  try {
+    const pack = await api(`/api/suspense/${encodeURIComponent(suspenseId)}/resolution-pack`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({actor: name, as_of: $("day").value})});
+    setStatus(`${pack.pack_id} assembled by ${name} — it stops at the gate; approval must name the chosen candidate.`);
+    $("resolution-result").innerHTML = "";
+    loadPacks();
+    document.querySelector('nav button[data-tab="packs"]').click();
+  } catch (e) { setStatus("Assembly refused: " + e.message); }
 }
 async function runRematch() {
   const name = $("actor").value.trim();
@@ -500,6 +536,8 @@ async function loadQuality() {
     [{key: "kind", label: "Proposal kind"}, {key: "proposals", label: "Proposals", num: 1},
      {key: "accepted_as_proposed", label: "Accepted as proposed", num: 1},
      {key: "accepted_with_edits", label: "Accepted with edits", num: 1},
+     {label: "Chosen (resolution)", render: r => r.chosen ?? ""},
+     {label: "Lapsed (resolution)", render: r => r.lapsed ?? ""},
      {key: "rejected", label: "Rejected (pack)", num: 1},
      {key: "value_edited", label: "Value edited", num: 1, render: r => money(r.value_edited)}], rows)
     + `<p class="note">Totals: ${q.totals.proposals} proposal(s), value edited ${money(q.totals.value_edited)}. The subject is the model's work; nobody is scored here.</p>`
@@ -613,15 +651,26 @@ async function loadPacks() {
     const alloc = p.entries.filter(e => e.kind === "allocation").reduce((s, e) => s + Number(e.allocation.amount), 0);
     const wo = p.entries.filter(e => e.kind === "write_off").reduce((s, e) => s + Number(e.write_off_amount), 0);
     const npTot = p.entries.filter(e => e.kind === "non_premium").reduce((s, e) => s + Number(e.non_premium.amount), 0);
+    const res = p.resolution || null;
     const actions = p.status === "proposed"
-      ? `<button onclick="act('${p.pack_id}','approve')">Approve</button>
+      ? (res
+        ? `<button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject docket</button>`
+        : `<button onclick="act('${p.pack_id}','approve')">Approve</button>
          <button class="ghost" onclick="editEntries('${p.pack_id}')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Edit entries</button>
          <button class="ghost" onclick="act('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject</button>
-         <a href="/api/packs/${p.pack_id}/posting-file">posting file</a>`
+         <a href="/api/packs/${p.pack_id}/posting-file">posting file</a>`)
       : (p.status === "approved" ? `<a href="/api/packs/${p.pack_id}/posting-file">posting file (CSV)</a>` : "");
+    const resBlock = res ? `<p class="note">Resolution docket for suspense item ${res.suspense_id} — ${money(res.amount)} ${res.currency} from bank line ${res.bank_line_id}. Scan: ${res.scan_backend}. ${p.status === "proposed" ? "Approval names ONE chosen candidate; the others lapse to this record. Nothing has been applied." : (res.chosen_candidate ? `Chosen: ${res.chosen_candidate}. The unchosen candidates lapsed to this record.` : "No candidate was chosen.")}</p>` +
+      table([{key: "candidate_id", label: "Candidate"},
+             {key: "policy_number", label: "Policy"},
+             {key: "interpretation", label: "Reading"},
+             {label: "Arithmetic", render: c => c.arithmetic},
+             {label: "Evidence", render: c => c.evidence ? `“${c.evidence}” (${c.evidence_kind.replace("_", " ")})` : "—"},
+             {label: "Flags", render: c => (c.flags || []).join(", ") || "—"},
+             {label: "Decide", render: c => p.status === "proposed" && !(c.flags || []).length ? `<button onclick="resolveApprove('${p.pack_id}','${c.candidate_id}')">Approve ${c.candidate_id}</button>` : (res.chosen_candidate === c.candidate_id ? "chosen" : "")}], res.candidates) : "";
     return `<h3>${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span>${(p.flags || []).map(f => ` <span class="pill bad">${f}</span>`).join("")}</h3>
       <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}${npTot ? `; non-premium dispositions ${money(npTot)}` : ""}. Approvals: ${p.approvals.join(", ") || "—"}${(p.flags || []).includes("RETURN_AFFECTED") ? " A line in this pack was returned by the bank; the entries stand as approved and the reversal lives on the return record." : ""}</p>
-      <p>${actions}</p>` +
+      <p>${actions}</p>` + resBlock +
       table([{label: "#", render: (r, i) => i},
              {key: "kind", label: "Kind"},
              {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.payable_offset ? r.payable_offset.policy_number : (r.non_premium ? r.non_premium.payer_name : (r.write_off_policy || "")))},
@@ -648,6 +697,16 @@ async function act(packId, kind) {
     }
     setStatus(`${packId} ${kind === "approve" ? "approved" : "rejected"} by ${name}.`);
     loadPacks(); loadReport();
+  } catch (e) { setStatus("Gate refused: " + e.message); }
+}
+async function resolveApprove(packId, candidateId) {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — the gate is named, never anonymous.");
+  try {
+    await api(`/api/packs/${packId}/approve`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({approver: name, choice: candidateId})});
+    setStatus(`${packId} approved by ${name}: candidate ${candidateId} chosen — the others lapsed to the pack's record.`);
+    loadPacks(); loadReport(); loadSuspense();
   } catch (e) { setStatus("Gate refused: " + e.message); }
 }
 async function loadAudit() {

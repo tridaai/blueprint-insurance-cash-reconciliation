@@ -34,6 +34,7 @@ from .objects import ObjectStore, make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
 from .pipeline import DayRunError, ingest_dataset, run_day
 from .rematch import rematch_suspense
+from .resolution import ResolutionError, assemble_resolution_pack, scan_candidates
 from .returns import ReturnError, line_history, record_return
 from .statement import StatementImportError, import_statement
 from .store import Store, dump, make_store
@@ -51,6 +52,10 @@ class RunRequest(BaseModel):
 class ApproveRequest(BaseModel):
     approver: str
     second_approver: str | None = None
+    # A resolution pack is approved by naming the chosen candidate
+    # (e.g. "C2"); the gate refuses a resolution approval without
+    # one, and a choice on any other pack.
+    choice: str | None = None
 
 
 class RejectRequest(BaseModel):
@@ -64,6 +69,11 @@ class WriteOffRequest(BaseModel):
 
 
 class RematchRequest(BaseModel):
+    actor: str = "cash-team"
+    as_of: date | None = None
+
+
+class ResolutionRequest(BaseModel):
     actor: str = "cash-team"
     as_of: date | None = None
 
@@ -324,6 +334,27 @@ def create_app(service: Service | None = None) -> FastAPI:
             s.store, s.reader, s.policy, body.actor, body.as_of or date.today()
         )
 
+    @app.post("/api/suspense/{suspense_id}/scan")
+    def resolution_scan(suspense_id: str, body: ResolutionRequest):
+        s = get_service()
+        try:
+            return scan_candidates(
+                s.store, s.reader, suspense_id, body.actor,
+                body.as_of or date.today())
+        except ResolutionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/suspense/{suspense_id}/resolution-pack")
+    def resolution_pack(suspense_id: str, body: ResolutionRequest):
+        s = get_service()
+        try:
+            pack = assemble_resolution_pack(
+                s.store, s.reader, suspense_id, body.actor,
+                body.as_of or date.today())
+        except ResolutionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return present(pack)
+
     @app.get("/api/packs")
     def packs():
         s = get_service()
@@ -341,7 +372,9 @@ def create_app(service: Service | None = None) -> FastAPI:
     def approve(pack_id: str, body: ApproveRequest):
         s = get_service()
         try:
-            return present(gate.approve_pack(s.store, pack_id, body.approver, s.policy, body.second_approver))
+            return present(gate.approve_pack(
+                s.store, pack_id, body.approver, s.policy,
+                body.second_approver, choice=body.choice))
         except GateError as exc:
             raise HTTPException(409, str(exc)) from exc
 

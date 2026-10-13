@@ -26,6 +26,7 @@ from .objects import make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
 from .pipeline import DayRunError, ingest_dataset, run_day
 from .rematch import rematch_suspense
+from .resolution import ResolutionError, assemble_resolution_pack, scan_candidates
 from .report import broker_scorecard, day_report, proposal_quality, return_premiums_view
 from .today import today_view
 from .returns import ReturnError, line_history, record_return
@@ -48,6 +49,14 @@ def main() -> None:
     rem = sub.add_parser("rematch", help="re-match open suspense against the books as they stand")
     rem.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     rem.add_argument("--actor", default="cash-team")
+    rsc = sub.add_parser("resolve-scan", help="scan one UNIDENTIFIED suspense item for resolution candidates across the whole book")
+    rsc.add_argument("suspense_id")
+    rsc.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
+    rsc.add_argument("--actor", default="cash-team")
+    rsa = sub.add_parser("resolve-assemble", help="assemble a resolution pack (a docket of alternates) for one UNIDENTIFIED suspense item")
+    rsa.add_argument("suspense_id")
+    rsa.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
+    rsa.add_argument("--actor", default="cash-team")
     sco = sub.add_parser("scorecard", help="print the broker netting scorecard")
     sco.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     clo = sub.add_parser("close", help="print a month-end close pack (a report, not a lock)")
@@ -154,6 +163,20 @@ def main() -> None:
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         summary = rematch_suspense(store, make_reader(), policy, args.actor, as_of)
         print(json.dumps(summary, indent=2))
+    elif args.command == "resolve-scan":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        try:
+            scan = scan_candidates(store, make_reader(), args.suspense_id, args.actor, as_of)
+        except ResolutionError as exc:
+            parser.exit(1, f"scan refused: {exc}\n")
+        print(json.dumps(scan, indent=2))
+    elif args.command == "resolve-assemble":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        try:
+            pack = assemble_resolution_pack(store, make_reader(), args.suspense_id, args.actor, as_of)
+        except ResolutionError as exc:
+            parser.exit(1, f"assembly refused: {exc}\n")
+        print(json.dumps(json.loads(pack.model_dump_json()), indent=2))
     elif args.command == "scorecard":
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         print(json.dumps(broker_scorecard(store, as_of), indent=2))
