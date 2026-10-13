@@ -554,9 +554,9 @@ class PostgresStore:
     # -- return premiums ---------------------------------------------------
     def add_cancellation(self, cxl):
         self._put(
-            "INSERT INTO cancellations (cancellation_id, policy_number, effective_date, payload) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (cancellation_id) DO NOTHING",
-            (cxl.cancellation_id, cxl.policy_number, cxl.effective_date, dump(cxl)),
+            "INSERT INTO cancellations (cancellation_id, policy_number, effective_date, recorded_on, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (cancellation_id) DO NOTHING",
+            (cxl.cancellation_id, cxl.policy_number, cxl.effective_date, cxl.recorded_on, dump(cxl)),
         )
 
     def cancellations(self):
@@ -571,10 +571,10 @@ class PostgresStore:
 
     def save_payable(self, payable):
         self._put(
-            "INSERT INTO return_premium_payables (payable_id, policy_number, status, payload) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (payable_id) DO UPDATE SET "
+            "INSERT INTO return_premium_payables (payable_id, policy_number, status, opened_on, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (payable_id) DO UPDATE SET "
             "status = EXCLUDED.status, payload = EXCLUDED.payload",
-            (payable.payable_id, payable.policy_number, payable.status, dump(payable)),
+            (payable.payable_id, payable.policy_number, payable.status, payable.opened_on, dump(payable)),
         )
 
     def payable(self, payable_id):
@@ -905,9 +905,10 @@ class SqliteStore:
     # -- return premiums ---------------------------------------------------
     def add_cancellation(self, cxl):
         self._put(
-            "INSERT OR IGNORE INTO cancellations (cancellation_id, policy_number, effective_date, payload) "
-            "VALUES (?, ?, ?, ?)",
-            (cxl.cancellation_id, cxl.policy_number, cxl.effective_date.isoformat(), dump(cxl)),
+            "INSERT OR IGNORE INTO cancellations (cancellation_id, policy_number, effective_date, recorded_on, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (cxl.cancellation_id, cxl.policy_number, cxl.effective_date.isoformat(),
+             cxl.recorded_on.isoformat(), dump(cxl)),
         )
 
     def cancellations(self):
@@ -922,10 +923,11 @@ class SqliteStore:
 
     def save_payable(self, payable):
         self._put(
-            "INSERT INTO return_premium_payables (payable_id, policy_number, status, payload) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT (payable_id) DO UPDATE SET "
+            "INSERT INTO return_premium_payables (payable_id, policy_number, status, opened_on, payload) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (payable_id) DO UPDATE SET "
             "status = excluded.status, payload = excluded.payload",
-            (payable.payable_id, payable.policy_number, payable.status, dump(payable)),
+            (payable.payable_id, payable.policy_number, payable.status,
+             payable.opened_on.isoformat(), dump(payable)),
         )
 
     def payable(self, payable_id):
