@@ -355,6 +355,71 @@ class PostingEntry(BaseModel):
     edits: list[EntryEdit] = Field(default_factory=list)
 
 
+class ResolutionAllocation(BaseModel):
+    """One installment's share of a resolution candidate: the cash
+    the candidate would apply there if the gate chose it. The
+    conversion figures are stamped when the candidate is scanned,
+    at the governed rate in force on the bank line's value date —
+    the same recording rule as the matcher's allocations — so a
+    candidate approved days later applies the figures it was
+    proposed at, never a re-priced version."""
+
+    policy_number: str
+    installment_id: str
+    amount: Decimal
+    fx_rate: Decimal | None = None
+    functional_amount: Decimal | None = None
+
+
+class ResolutionCandidate(BaseModel):
+    """One defensible reading of an unidentified wire, found by the
+    resolution scan (resolution.py). A candidate exists only when
+    it carries exact arithmetic (an amount interpretation that
+    foots to the cent) or verbatim evidence from the line's own
+    text — usually both. A candidate with neither is not a
+    candidate and never reaches the record.
+
+    A flagged candidate names a policy the evidence points at
+    whose cash cannot be applied (cancelled, or nothing open):
+    it stands on the record as considered-and-flagged, and the
+    gate can never choose it."""
+
+    candidate_id: str  # "C1", "C2", ... within one scan
+    policy_number: str
+    broker_id: str | None  # the policy's broker of record, if any
+    interpretation: str  # "exact" | "netting" | "installment_run" | "narrative"
+    allocations: list[ResolutionAllocation] = Field(default_factory=list)
+    arithmetic: str = ""  # the interpretation, shown: figures and rates named
+    evidence: str = ""  # verbatim text from the bank line, when evidence carries it
+    evidence_kind: str = ""  # "policy_number" | "insured_name" | "broker_name" | "payer_name"
+    proposed_by: str = "resolution_scan"  # the scan, or the model backend that added it
+    flags: list[str] = Field(default_factory=list)  # "CANCELLED_POLICY" | "NO_OPEN_BALANCE"
+    model_rank: int | None = None  # the model's ordering, when a model ranked the scan
+    model_explanation: str = ""  # the model's one line on this candidate, when it gave one
+
+    @property
+    def total(self) -> Decimal:
+        return sum((a.amount for a in self.allocations), Decimal("0.00"))
+
+
+class ResolutionInfo(BaseModel):
+    """The resolution docket carried on a PACK-RESOLVE pack: the
+    suspense item the pack decides, the candidate set the scan
+    produced (the alternates), and — after approval — the one
+    candidate the approver chose. The unchosen candidates lapse
+    back to this record; they are never deleted, because "what
+    else this cash could have been" is part of what the gate
+    decided."""
+
+    suspense_id: str
+    bank_line_id: str
+    amount: Decimal  # the suspense item's cash — every candidate sums to it
+    currency: str = "USD"
+    scan_backend: str = "resolution_scan"  # who scanned; "…+model:<backend>" when a model ranked
+    candidates: list[ResolutionCandidate] = Field(default_factory=list)
+    chosen_candidate: str | None = None
+
+
 class PostingPack(BaseModel):
     pack_id: str
     value_date: date
@@ -367,6 +432,15 @@ class PostingPack(BaseModel):
     # RETURN_AFFECTED) annotates the record; the entries — the body
     # a human approved — are never rewritten after the fact.
     flags: list[str] = Field(default_factory=list)
+    # Set on a resolution pack (PACK-RESOLVE-*): the docket of
+    # alternates for one unidentified suspense item. Such a pack
+    # carries NO entries until the gate approves it — approval
+    # names the chosen candidate and materialises exactly that
+    # candidate's allocations as the pack's entries, so every
+    # figure computed from entries (posting file, day totals,
+    # the returns replay) sees the one settlement that happened,
+    # never the sum of the roads not taken.
+    resolution: ResolutionInfo | None = None
 
     @property
     def allocation_total(self) -> Decimal:
