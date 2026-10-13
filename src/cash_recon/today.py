@@ -91,12 +91,12 @@ def today_view(store: Store, day: date, policy: PolicyConfig) -> dict:
             f"{len(waiting)} pack(s) wait for a named decision: {', '.join(waiting)}.",
             "packs"))
 
-    # 5 — the re-match: attempts recorded for this business day are
-    # on the audit trail (their details name the day they ran for),
-    # or a re-match pack carries the day's date.
+    # 5 — the re-match: the pass stamps its attempt records with
+    # the business date it ran for, so attempts dated today are on
+    # the audit trail — or a re-match pack carries the day's date.
     attempts = [
         e for e in store.audit_events()
-        if e.action == "suspense_rematch_attempt" and day.isoformat() in e.detail
+        if e.action == "suspense_rematch_attempt" and e.at.date() == day
     ]
     rematch_pack = store.pack(f"PACK-REMATCH-{day.isoformat()}")
     if attempts or rematch_pack is not None:
