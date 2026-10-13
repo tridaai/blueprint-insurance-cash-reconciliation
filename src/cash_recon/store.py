@@ -61,6 +61,7 @@ from .models import (
     AuditEvent,
     BankLine,
     Broker,
+    BrokerStatement,
     Cancellation,
     DayClaim,
     ExceptionRecord,
@@ -137,6 +138,9 @@ class Store(Protocol):
     def returns(self, on: date | None = None) -> list[PaymentReturn]: ...
     def return_for_line(self, bank_line_id: str) -> PaymentReturn | None: ...
     def returns_for_line(self, bank_line_id: str) -> list[PaymentReturn]: ...
+    def save_broker_statement(self, stmt: BrokerStatement) -> None: ...
+    def broker_statements(self, broker_id: str | None = None, period: str | None = None) -> list[BrokerStatement]: ...
+    def broker_statement(self, statement_id: str) -> BrokerStatement | None: ...
     def claim_day(self, claim: DayClaim) -> bool: ...
     def day_claim(self, day: date) -> DayClaim | None: ...
     def reclaim_day(self, claim: DayClaim, from_attempt: int) -> bool: ...
@@ -191,6 +195,7 @@ class InMemoryStore:
         self._suspense: dict[str, SuspenseItem] = {}
         self._packs: dict[str, PostingPack] = {}
         self._returns: dict[str, PaymentReturn] = {}
+        self._broker_statements: dict[str, BrokerStatement] = {}
         self._cancellations: dict[str, Cancellation] = {}
         self._payables: dict[str, ReturnPremiumPayable] = {}
         self._payout_packs: dict[str, PayoutPack] = {}
@@ -242,6 +247,24 @@ class InMemoryStore:
 
     def returns_for_line(self, bank_line_id):
         return [r for r in self.returns() if r.bank_line_id == bank_line_id]
+
+    # -- broker statements -------------------------------------------
+    def save_broker_statement(self, stmt):
+        self._broker_statements[stmt.statement_id] = copy.deepcopy(stmt)
+
+    def broker_statements(self, broker_id=None, period=None):
+        rows = sorted(
+            copy.deepcopy(list(self._broker_statements.values())),
+            key=lambda s: s.statement_id,
+        )
+        return [
+            s for s in rows
+            if (broker_id is None or s.broker_id == broker_id)
+            and (period is None or s.period == period)
+        ]
+
+    def broker_statement(self, statement_id):
+        return copy.deepcopy(self._broker_statements.get(statement_id))
 
     # -- day claims & run locks -----------------------------------------
     def claim_day(self, claim):
@@ -548,6 +571,48 @@ class PostgresStore:
             (bank_line_id,),
         )
         return [PaymentReturn.model_validate(r["payload"]) for r in rows]
+
+    # -- broker statements -------------------------------------------
+    def save_broker_statement(self, stmt):
+        self._put(
+            "INSERT INTO broker_statements (statement_id, broker_id, period, payload) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (statement_id) DO UPDATE SET "
+            "broker_id = EXCLUDED.broker_id, period = EXCLUDED.period, "
+            "payload = EXCLUDED.payload",
+            (stmt.statement_id, stmt.broker_id, stmt.period, dump(stmt)),
+        )
+
+    def broker_statements(self, broker_id=None, period=None):
+        if broker_id is not None and period is not None:
+            rows = self._all(
+                "SELECT payload FROM broker_statements "
+                "WHERE broker_id = %s AND period = %s ORDER BY statement_id",
+                (broker_id, period),
+            )
+        elif broker_id is not None:
+            rows = self._all(
+                "SELECT payload FROM broker_statements "
+                "WHERE broker_id = %s ORDER BY statement_id",
+                (broker_id,),
+            )
+        elif period is not None:
+            rows = self._all(
+                "SELECT payload FROM broker_statements "
+                "WHERE period = %s ORDER BY statement_id",
+                (period,),
+            )
+        else:
+            rows = self._all(
+                "SELECT payload FROM broker_statements ORDER BY statement_id"
+            )
+        return [BrokerStatement.model_validate(r["payload"]) for r in rows]
+
+    def broker_statement(self, statement_id):
+        row = self._one(
+            "SELECT payload FROM broker_statements WHERE statement_id = %s",
+            (statement_id,),
+        )
+        return BrokerStatement.model_validate(row["payload"]) if row else None
 
     # -- day claims & run locks -----------------------------------------
     def claim_day(self, claim):
@@ -971,6 +1036,48 @@ class SqliteStore:
             (bank_line_id,),
         )
         return [PaymentReturn.model_validate(self._payload(r)) for r in rows]
+
+    # -- broker statements -------------------------------------------
+    def save_broker_statement(self, stmt):
+        self._put(
+            "INSERT INTO broker_statements (statement_id, broker_id, period, payload) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(statement_id) DO UPDATE SET "
+            "broker_id = excluded.broker_id, period = excluded.period, "
+            "payload = excluded.payload",
+            (stmt.statement_id, stmt.broker_id, stmt.period, dump(stmt)),
+        )
+
+    def broker_statements(self, broker_id=None, period=None):
+        if broker_id is not None and period is not None:
+            rows = self._all(
+                "SELECT payload FROM broker_statements "
+                "WHERE broker_id = ? AND period = ? ORDER BY statement_id",
+                (broker_id, period),
+            )
+        elif broker_id is not None:
+            rows = self._all(
+                "SELECT payload FROM broker_statements "
+                "WHERE broker_id = ? ORDER BY statement_id",
+                (broker_id,),
+            )
+        elif period is not None:
+            rows = self._all(
+                "SELECT payload FROM broker_statements "
+                "WHERE period = ? ORDER BY statement_id",
+                (period,),
+            )
+        else:
+            rows = self._all(
+                "SELECT payload FROM broker_statements ORDER BY statement_id"
+            )
+        return [BrokerStatement.model_validate(self._payload(r)) for r in rows]
+
+    def broker_statement(self, statement_id):
+        row = self._one(
+            "SELECT payload FROM broker_statements WHERE statement_id = ?",
+            (statement_id,),
+        )
+        return BrokerStatement.model_validate(self._payload(row)) if row else None
 
     # -- day claims & run locks -----------------------------------------
     def claim_day(self, claim):

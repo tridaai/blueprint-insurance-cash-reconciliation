@@ -124,6 +124,22 @@
       <span class="note" id="trends-status"></span>
     </div>
     <div id="trends"></div>
+    <h3>Broker statement reconciliation</h3>
+    <p class="note">A broker's own monthly statement, checked against the books. Paste the statement CSV (a <em>Broker:</em> line and a <em>Period:</em> line, then policy / gross billed / commission / net remitted / remittance reference rows, with CONTROL TOTAL and CONTROL COUNT trailers — a mismatch refuses the whole import and nothing is stored; re-importing the same file dedupes, and a corrected statement supersedes the standing one), or choose the file. The reconciliation classifies every line — agreed, amount differs, commission differs, missing on the books, missing on the statement — shows both figures where they differ, and its totals foot to the month's by-broker splits. It reconciles <em>applied</em> cash only: cash standing in suspense is the desk's open work and raises no row here. A row that maps to an open exception names it; assignment and notes happen in the Workbench, not here.</p>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
+      <input type="file" id="bstmt-file" accept=".csv,text/csv,text/plain">
+      <button id="bstmt-import" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer">Import broker statement</button>
+      <span class="note" id="bstmt-status"></span>
+    </div>
+    <textarea id="bstmt-text" rows="8" style="width:100%; font-family:ui-monospace, monospace; font-size:13px; border:1px solid var(--line); border-radius:8px; padding:10px" placeholder="Broker: BRK-FERN&#10;Period: 2026-10&#10;Policy,Gross billed,Commission,Net remitted,Remittance reference&#10;NSP-1046,8000.00,1040.00,6960.00,FW-2026-10-114"></textarea>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0">
+      <label>Broker <input type="text" id="bstmt-broker" value="BRK-FERN" size="12"></label>
+      <span class="note">for the month above</span>
+      <button id="bstmt-load" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:#fff; color:var(--accent); cursor:pointer">Reconcile</button>
+      <a id="bstmt-text-link" href="#" target="_blank">text rendering ↗</a>
+      <span class="note" id="bstmt-load-status"></span>
+    </div>
+    <div id="bstmt-result"></div>
   </section>
   <section id="tab-scorecard" class="hidden">
     <p class="note">Per broker, over everything on the books: how their cash arrives, how cleanly their netting settles, and what is still open against them. The money columns are the daily reports' by-broker split, summed. Query notes are drafts the system wrote for review — nothing here sends anything.</p>
@@ -336,6 +352,13 @@ async function loadClose() {
       [{key: "k", label: "Sub-kind"}, {key: "v", label: "Dispositions", num: 1}], Object.entries(p.non_premium.by_kind).map(([kind, s]) =>
         ({k: kind, v: `${s.count} line(s) · approved ${money(s.approved)} · proposed ${money(s.proposed)} · rejected ${money(s.rejected)}`})))
       + `<p class="note">Posted to the non-premium ledger: ${money(p.non_premium.posted_total)}. Non-premium cash never enters suspense and never touches a receivable.</p>` : "") +
+    ((p.broker_statement_reconciliation || []).length ? `<h3>Broker statement reconciliation cited in this close</h3>` + table(
+      [{key: "broker_name", label: "Broker"},
+       {label: "Classes", render: r => Object.entries(r.counts).filter(([, v]) => v).map(([k, v]) => `${k} ${v}`).join(" · ")},
+       {label: "Statement vs books", render: r => Object.entries(r.totals).map(([ccy, t]) => `${ccy} ${money(t.statement_net_total)} vs ${money(t.books_net_total)}`).join("; ")},
+       {label: "Foots", render: r => r.foots ? "foots" : "NOT FOOTED"},
+       {key: "statement_id", label: "Statement"}], p.broker_statement_reconciliation)
+      + `<p class="note">A citation, not a control: the reconciliation checks applied cash against each broker's own statement; suspense is reconciled in the roll above, never here.</p>` : "") +
     ((p.proposal_quality && p.proposal_quality.totals.proposals) ? `<h3>Model proposal quality in the month</h3>` + table(
       [{key: "k", label: "Kind"}, {key: "v", label: "Outcome split", num: 1}], Object.entries(p.proposal_quality.by_kind).map(([kind, s]) =>
         ({k: kind, v: `${s.proposals} proposed · ${s.accepted_as_proposed} as proposed · ${s.accepted_with_edits} with edits · ${s.rejected} rejected · value edited ${money(s.value_edited)}`}))) : "") +
@@ -359,6 +382,45 @@ async function loadClose() {
     (p.discrepancies.length ? `<h3>Discrepancies</h3>` + table(
       [{key: "suspense_id", label: "Item"}, {key: "problem", label: "Problem"},
        {key: "amount", label: "Amount at issue", num: 1, render: r => money(r.amount)}], p.discrepancies) : "");
+}
+async function runBrokerImport() {
+  const text = $("bstmt-text").value;
+  if (!text.trim()) return ($("bstmt-status").textContent = "Paste a broker statement or choose a file first.");
+  try {
+    const r = await api("/api/broker-statements/import", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text, source_name: "console"})});
+    $("bstmt-status").textContent = r.deduped
+      ? `${r.statement_id} is already on the books — nothing changed.`
+      : `Imported ${r.statement_id}: ${r.lines} line(s), net ${money(r.net_total)} for ${r.broker_id} · ${r.period}` +
+        (r.superseded.length ? ` — supersedes ${r.superseded.join(", ")}.` : ".");
+    $("bstmt-broker").value = r.broker_id;
+    $("close-month").value = r.period;
+  } catch (e) { $("bstmt-status").textContent = "Import refused: " + e.message; }
+}
+async function loadBrokerRecon() {
+  const broker = $("bstmt-broker").value.trim();
+  const month = $("close-month").value;
+  if (!broker) return ($("bstmt-load-status").textContent = "Enter the broker id first.");
+  $("bstmt-text-link").href = `/api/broker-reconciliation/${encodeURIComponent(broker)}/${month}/text`;
+  try {
+    const exp = await api(`/api/broker-reconciliation/${encodeURIComponent(broker)}/${month}`);
+    const b = exp.reconciliation;
+    const totals = Object.entries(b.totals).map(([ccy, t]) =>
+      `${ccy}: statement ${money(t.statement_net_total)} · books applied ${money(t.books_net_total)} · day splits ${money(t.day_split_allocated)} (posted ${money(t.posted)} + at the gate ${money(t.at_gate)} + on rejected packs ${money(t.on_rejected_packs)})`).join("<br>");
+    $("bstmt-result").innerHTML =
+      `<p><span class="pill ${b.foots ? "ok" : "bad"}">${b.foots ? "FOOTS" : "NOT FOOTED"}</span> ${b.footing_note}</p>
+       <p class="note">Statement ${b.statement_id} · ${b.broker_name} · ${b.statement_lines} line(s) · SHA-256 <code>${exp.sha256}</code> — regenerated from unchanged books it is byte-identical.</p>
+       <p>${Object.entries(b.counts).map(([k, v]) => `<span class="pill ${v && k !== "AGREED" ? "bad" : ""}">${k} ${v}</span>`).join(" ")}</p>
+       <p class="note">${totals}</p>` +
+      table([{key: "class", label: "Class", render: r => `<span class="pill ${r.class === "AGREED" ? "ok" : "bad"}">${r.class}</span>`},
+             {key: "policy_number", label: "Policy"},
+             {label: "Statement net", num: 1, render: r => r.statement ? money(r.statement.net) : "—"},
+             {label: "Books net", num: 1, render: r => r.books ? money(r.books.net) : "—"},
+             {key: "detail", label: "Detail"},
+             {label: "Open exception", render: r => r.exception ? `${r.exception.exception_id} (${r.exception.code}) — ${r.exception.assignee || "unassigned"}, ${r.exception.notes} note(s)` : "—"}], b.rows) +
+      `<p class="note">${b.boundary_note}</p>`;
+    $("bstmt-load-status").textContent = "";
+  } catch (e) { $("bstmt-load-status").textContent = e.message; $("bstmt-result").innerHTML = ""; }
 }
 async function loadTrends() {
   const t = await api("/api/trends");
@@ -733,6 +795,12 @@ $("payout-assemble").addEventListener("click", assemblePayouts);
 $("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
 $("load-trends").addEventListener("click", () => loadTrends().catch(e => setStatus(e.message)));
 $("import-go").addEventListener("click", runImport);
+$("bstmt-import").addEventListener("click", runBrokerImport);
+$("bstmt-load").addEventListener("click", () => loadBrokerRecon().catch(e => setStatus(e.message)));
+$("bstmt-file").addEventListener("change", async (ev) => {
+  const file = ev.target.files[0];
+  if (file) $("bstmt-text").value = await file.text();
+});
 $("import-file").addEventListener("change", async (ev) => {
   const file = ev.target.files[0];
   if (file) $("import-text").value = await file.text();

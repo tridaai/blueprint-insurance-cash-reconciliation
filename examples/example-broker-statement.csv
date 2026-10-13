@@ -1,0 +1,10 @@
+Broker statement — Fernway Insurance Group, October 2026 (synthetic example)
+Broker: BRK-FERN
+Period: 2026-10
+Policy,Gross billed,Commission,Net remitted,Remittance reference,Currency
+NSP-1046,8000.00,1040.00,6960.00,FW-2026-10-114,USD
+NSP-1007,4410.00,573.30,3836.70,FW-2026-10-098,USD
+NSP-1047,6500.00,845.00,5655.00,FW-2026-10-121,USD
+NSP-1099,3000.00,390.00,2610.00,FW-2026-10-130,USD
+CONTROL TOTAL,,,19061.70,,
+CONTROL COUNT,,,,4,

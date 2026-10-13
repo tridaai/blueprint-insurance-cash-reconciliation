@@ -54,6 +54,12 @@ equivalents of the closing suspense at month-end governed rates,
 labelled as translations: they present the position in one
 currency for a reader; they are not postings, and no control in
 the pack runs on them.
+
+When a broker sent a statement for the month, the pack also
+cites the broker statement reconciliation for it — counts by
+class and the statement and books totals, under that report's
+own footing. The citation changes no identity here; on a month
+with no statements it is absent entirely.
 """
 
 from __future__ import annotations
@@ -620,6 +626,17 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         "non_premium": non_premium_ledger(store, month=(year, month)),
         "discrepancies": discrepancies,
     }
+    # Broker statement reconciliation, cited when a broker sent a
+    # statement for this month: counts by class and the statement
+    # and books totals, under the reconciliation's own footing. It
+    # changes no identity in this pack — it is a citation — and on
+    # a month with no statements the section is absent entirely,
+    # so statement-less months' packs read exactly as they did.
+    from .broker_statement import reconciliation_summaries
+
+    stmt_summaries = reconciliation_summaries(store, year, month)
+    if stmt_summaries:
+        body["broker_statement_reconciliation"] = stmt_summaries
     return body
 
 
@@ -850,6 +867,23 @@ def render_close_pack_text(export: dict) -> str:
             f"  {row['broker']:<34} bank {row['bank_total']:>10}  allocated "
             f"{row['allocated_total']:>10}  suspense {row['suspense_total']:>9}  "
             f"clean netting {rate}  mismatches {row['netting_mismatches']}"
+        )
+    if body.get("broker_statement_reconciliation"):
+        out += ["", "BROKER STATEMENT RECONCILIATION (statements standing for this month)"]
+        for s in body["broker_statement_reconciliation"]:
+            counts = " · ".join(f"{k} {v}" for k, v in s["counts"].items() if v)
+            totals = "; ".join(
+                f"{ccy} statement {t['statement_net_total']} vs books {t['books_net_total']}"
+                for ccy, t in sorted(s["totals"].items())
+            )
+            out.append(
+                f"  {s['broker_name']}: {counts or 'no rows'} — {totals} — "
+                f"{'foots' if s['foots'] else 'NOT FOOTED'} (statement {s['statement_id']})"
+            )
+        out.append(
+            "  The reconciliation checks applied cash against the broker's own "
+            "statement; cash standing in suspense is reconciled in the roll "
+            "above, never here."
         )
     if body["discrepancies"]:
         out += ["", "DISCREPANCIES"]

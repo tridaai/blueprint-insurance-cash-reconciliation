@@ -67,6 +67,12 @@ def main() -> None:
     npl.add_argument("--month", help="YYYY-MM; default: all months")
     imp = sub.add_parser("import-statement", help="import a generic bank statement CSV")
     imp.add_argument("path", help="path to the statement CSV")
+    bsi = sub.add_parser("import-broker-statement", help="import a broker's own monthly statement CSV (control totals checked; refused whole on any mismatch)")
+    bsi.add_argument("path", help="path to the broker statement CSV")
+    bsr = sub.add_parser("broker-reconciliation", help="reconcile a broker's statement for a month against the books: every line classified, totals footing")
+    bsr.add_argument("broker_id", help="e.g. BRK-FERN")
+    bsr.add_argument("month", help="YYYY-MM")
+    bsr.add_argument("--format", choices=("json", "text"), default="json")
     ret = sub.add_parser("return", help="record a bank return against an applied bank line")
     ret.add_argument("bank_line_id")
     ret.add_argument("reason", help="NSF | ACCOUNT_CLOSED | STOP_PAYMENT | RECALL")
@@ -202,6 +208,35 @@ def main() -> None:
         except StatementImportError as exc:
             parser.exit(1, f"import refused: {exc}\n")
         print(json.dumps(report, indent=2))
+    elif args.command == "import-broker-statement":
+        from pathlib import Path
+
+        from .broker_statement import BrokerStatementError, import_broker_statement
+
+        try:
+            report = import_broker_statement(
+                store, Path(args.path).read_text(), source_name=Path(args.path).name
+            )
+        except BrokerStatementError as exc:
+            parser.exit(1, f"import refused: {exc}\n")
+        print(json.dumps(report, indent=2))
+    elif args.command == "broker-reconciliation":
+        from .broker_statement import (
+            BrokerStatementError,
+            broker_reconciliation_export,
+            render_broker_reconciliation_text,
+        )
+
+        year, month = parse_month(args.month)
+        try:
+            export = broker_reconciliation_export(
+                store, args.broker_id, f"{year:04d}-{month:02d}", policy)
+        except BrokerStatementError as exc:
+            parser.exit(1, f"reconciliation refused: {exc}\n")
+        if args.format == "text":
+            print(render_broker_reconciliation_text(export), end="")
+        else:
+            print(json.dumps(export, indent=2))
     elif args.command == "return":
         from decimal import Decimal
 

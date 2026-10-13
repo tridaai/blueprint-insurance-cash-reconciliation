@@ -19,6 +19,13 @@ from pydantic import BaseModel
 
 from . import gate, webhooks
 from . import report as report_mod
+from .broker_statement import (
+    BrokerStatementError,
+    broker_reconciliation_export,
+    import_broker_statement,
+    render_broker_reconciliation_text,
+    statement_summaries,
+)
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import WatchPolicy
@@ -248,6 +255,49 @@ def create_app(service: Service | None = None) -> FastAPI:
             return import_statement(s.store, body.text, body.source_name)
         except StatementImportError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/broker-statements/import")
+    def import_broker_stmt(body: StatementImportRequest):
+        s = get_service()
+        try:
+            return import_broker_statement(s.store, body.text, body.source_name)
+        except BrokerStatementError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/broker-statements")
+    def broker_statements():
+        s = get_service()
+        return statement_summaries(s.store)
+
+    @app.get("/api/broker-reconciliation/{broker_id}/{month}")
+    def broker_reconciliation(broker_id: str, month: str):
+        s = get_service()
+        try:
+            year, mon = parse_month(month)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            return broker_reconciliation_export(
+                s.store, broker_id, f"{year:04d}-{mon:02d}", s.policy)
+        except BrokerStatementError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/broker-reconciliation/{broker_id}/{month}/text")
+    def broker_reconciliation_text(broker_id: str, month: str):
+        s = get_service()
+        try:
+            year, mon = parse_month(month)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            export = broker_reconciliation_export(
+                s.store, broker_id, f"{year:04d}-{mon:02d}", s.policy)
+        except BrokerStatementError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return PlainTextResponse(
+            render_broker_reconciliation_text(export),
+            media_type="text/plain",
+        )
 
     @app.get("/api/exceptions")
     def exceptions(status: str | None = None):

@@ -648,6 +648,44 @@ class PayoutPack(BaseModel):
         return sum((e.amount for e in self.entries), Decimal("0.00"))
 
 
+class BrokerStatementLine(BaseModel):
+    """One line of a broker's own monthly statement: what the
+    broker says it billed, what commission it says it took, and
+    what net it says it remitted, under its own remittance
+    reference. The broker's figures are claims, not postings —
+    the reconciliation reads them against the books and classifies
+    every disagreement; nothing here ever edits a book record."""
+
+    policy_number: str
+    gross: Decimal  # gross billed, as the broker states it
+    commission: Decimal  # the commission the broker says it took
+    net: Decimal  # net remitted, as the broker states it
+    reference: str = ""  # the broker's own remittance reference
+    currency: str = "USD"
+
+
+class BrokerStatement(BaseModel):
+    """A broker statement as imported: one broker, one period,
+    held as a record of its own so the reconciliation can cite
+    exactly which statement it read. A corrected statement for the
+    same broker and period supersedes the standing one — the old
+    record stays, marked with what replaced it, and only the
+    standing statement is reconciled."""
+
+    statement_id: str  # BSTMT-<digest of the file text>
+    broker_id: str
+    period: str  # "YYYY-MM"
+    source_name: str = ""
+    superseded_by: str | None = None
+    control_total: Decimal | None = None  # the file's trailer, as stated
+    control_count: int | None = None
+    lines: list[BrokerStatementLine] = Field(default_factory=list)
+
+    @property
+    def net_total(self) -> Decimal:
+        return sum((l.net for l in self.lines), Decimal("0.00"))
+
+
 class AuditEvent(BaseModel):
     at: datetime
     actor: str  # a person, "matcher", "reader:<backend>", "gate", ...
