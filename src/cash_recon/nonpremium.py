@@ -97,6 +97,7 @@ def assemble_disposition_pack(
             non_premium=NonPremiumEntry(
                 bank_line_id=line.bank_line_id, kind=kind, amount=line.amount,
                 payer_name=line.payer_name, narrative=line.narrative,
+                currency=line.currency,
             ),
         ))
     existing = store.pack(pack.pack_id)

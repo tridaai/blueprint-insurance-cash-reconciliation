@@ -37,6 +37,17 @@ before they start: it meets any open return-premium payable on that
 policy first, in code, and only the remainder is exceptioned into
 suspense as before.
 
+Currency comes before every tier. A line is worked only against
+open items denominated in the line's own currency — exact, netting,
+remittance lines, and lump-sum candidates alike — and the broker's
+commission applies in that currency. Cash is never converted to
+hunt a match in another currency: a line whose payer has nothing
+open in its currency raises CURRENCY_NO_OPEN_ITEMS and sits in
+suspense in its own denomination. Where a settlement does happen,
+the allocation records the conversion beside the cash: the governed
+rate in force on the line's value date and the functional amount it
+produces, stamped in code at _finish and never re-priced later.
+
 Every line ends fully accounted for: allocations + payable offsets
 + suspense == the bank amount, to the cent. The matcher asserts it.
 """
@@ -51,6 +62,7 @@ from decimal import Decimal
 from pydantic import BaseModel
 
 from .config import Policy as PolicyConfig
+from .fx import FUNCTIONAL_CURRENCY, rate_on, to_functional
 from .llm import Candidate
 from .models import (
     Allocation,
@@ -166,6 +178,7 @@ def _exc(line, code, amount, detail, policy_number=None, broker_id=None, propose
         policy_number=policy_number,
         broker_id=broker_id,
         amount=cents(amount),
+        currency=line.currency,
         detail=detail,
         first_seen=line.value_date,
         proposed_by=proposed_by,
@@ -270,6 +283,27 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
         )
         outcome.suspense_amount = line.amount
         return _finish(line, outcome)
+    if rec is not None and rec.currency != line.currency:
+        # The policy is real, but it is billed in another currency.
+        # Converting the cash to hunt a match across currencies is
+        # refused by design: the line is not this policy's cash in
+        # any amount, so it waits in suspense in its own currency.
+        outcome.record_attempt(
+            "REFERENCE_MATCH", "raised",
+            f"CURRENCY_NO_OPEN_ITEMS: {rec.policy_number} is billed in "
+            f"{rec.currency}; this line arrived in {line.currency}. Cash "
+            "is matched in its own currency only, so nothing on the "
+            "referenced policy was touched.")
+        outcome.exceptions.append(
+            _exc(line, ExceptionCode.CURRENCY_NO_OPEN_ITEMS, line.amount,
+                 f"{rec.policy_number} is billed in {rec.currency}, but this "
+                 f"cash arrived in {line.currency}. Premium cash is never "
+                 "converted to settle a policy billed in another currency. "
+                 f"Held in suspense in {line.currency}.",
+                 policy_number=rec.policy_number, broker_id=rec.broker_id)
+        )
+        outcome.suspense_amount = line.amount
+        return _finish(line, outcome)
     if rec is not None:
         outcome = _match_reference(line, rec, ctx, outcome, broker)
         _flag_intent(line, rec, outcome)
@@ -280,6 +314,9 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
         proposal = _propose_lump_sum(line, broker, ctx, outcome)
         if proposal is not None:
             return proposal
+        currency_outcome = _currency_no_open_items(line, broker, ctx, outcome)
+        if currency_outcome is not None:
+            return currency_outcome
 
     # -- T5: unidentified ------------------------------------------------------
     outcome.record_attempt(
@@ -370,19 +407,24 @@ def _flag_intent(line: BankLine, rec: Receivable, outcome: LineOutcome) -> None:
 
 def _policy_for_payer(line: BankLine, ctx: MatchContext) -> Receivable | None:
     norm = _norm(line.payer_name)
-    hits = [r for r in ctx.receivables.values() if _norm(r.insured_name) == norm]
+    hits = [r for r in ctx.receivables.values()
+            if _norm(r.insured_name) == norm and r.currency == line.currency]
     return hits[0] if len(hits) == 1 else None
 
 
 def _fingerprint_match(line: BankLine, prior: BankLine, ctx: MatchContext) -> bool:
-    """The duplicate fingerprint: same payer, same amount, close
-    dates. Shared by the duplicate check and the re-send check —
-    they differ only in which population of priors they look at."""
+    """The duplicate fingerprint: same payer, same amount, same
+    currency, close dates. Shared by the duplicate check and the
+    re-send check — they differ only in which population of priors
+    they look at. Currency is part of the fingerprint: the same
+    number in another currency is different money, not a duplicate."""
     if prior.bank_line_id == line.bank_line_id:
         return False
     if _norm(prior.payer_name) != _norm(line.payer_name):
         return False
     if prior.amount != line.amount:
+        return False
+    if prior.currency != line.currency:
         return False
     return abs((line.value_date - prior.value_date).days) <= ctx.policy.duplicate_window_days
 
@@ -433,7 +475,7 @@ def _net_against_payable(line, rec: Receivable, amount: Decimal, ctx, outcome) -
     ctx._payable_offset_used[payable.payable_id] = used + offset
     outcome.offsets.append(PayableOffset(
         bank_line_id=line.bank_line_id, payable_id=payable.payable_id,
-        policy_number=rec.policy_number, amount=offset))
+        policy_number=rec.policy_number, amount=offset, currency=line.currency))
     outcome.record_attempt(
         "PAYABLE_NETTING", "netted",
         f"{offset} netted against return-premium payable {payable.payable_id} "
@@ -802,6 +844,17 @@ def _match_remittance(line, rem: Remittance, ctx, outcome) -> LineOutcome:
             )
             outcome.suspense_amount += rline.amount
             continue
+        if rec.currency != line.currency:
+            outcome.exceptions.append(
+                _exc(line, ExceptionCode.CURRENCY_NO_OPEN_ITEMS, rline.amount,
+                     f"Remittance {rem.remittance_id} pays {rline.policy_number}, which is "
+                     f"billed in {rec.currency}; the wire arrived in {line.currency}. "
+                     "Cash is matched in its own currency only. That portion is "
+                     "held in suspense.",
+                     policy_number=rline.policy_number, broker_id=rem.broker_id)
+            )
+            outcome.suspense_amount += rline.amount
+            continue
         if rec.status == PolicyStatus.CANCELLED:
             remainder = _net_against_payable(line, rec, rline.amount, ctx, outcome)
             if remainder > ZERO:
@@ -869,6 +922,12 @@ def _propose_lump_sum(line, broker, ctx, outcome: LineOutcome) -> LineOutcome | 
     for rec in sorted(ctx.receivables.values(), key=lambda r: r.policy_number):
         if rec.broker_id != broker.broker_id or rec.status == PolicyStatus.CANCELLED:
             continue
+        if rec.currency != line.currency:
+            # A lump sum is explained in the currency it arrived in:
+            # the broker's items in other currencies are not
+            # candidates, however neatly a converted figure might
+            # foot. Cross-currency proposals are refused by design.
+            continue
         for inst in rec.open_installments():
             candidates.append(Candidate(policy_number=rec.policy_number,
                                         installment_id=inst.installment_id,
@@ -899,6 +958,14 @@ def _propose_lump_sum(line, broker, ctx, outcome: LineOutcome) -> LineOutcome | 
                 f"on {broker.name}'s book; a lump sum never crosses "
                 "brokers, so the proposal was refused whole.")
             return None
+        if named.currency != line.currency:
+            outcome.record_attempt(
+                "LUMP_SUM_PROPOSAL", "refused",
+                f"The proposal named {cand.policy_number}, billed in "
+                f"{named.currency}, against a wire in {line.currency}; a "
+                "lump sum never crosses currencies, so the proposal was "
+                "refused whole.")
+            return None
     outcome.proposed_by = proposal.backend
     outcome.record_attempt(
         "LUMP_SUM_PROPOSAL", "proposed",
@@ -913,7 +980,54 @@ def _propose_lump_sum(line, broker, ctx, outcome: LineOutcome) -> LineOutcome | 
     return _finish(line, outcome)
 
 
+def _currency_no_open_items(line, broker, ctx, outcome: LineOutcome) -> LineOutcome | None:
+    """The currency outcome for an unexplained broker wire: the
+    broker's book has open items, but none denominated in this
+    line's currency. Converting the wire to settle another
+    currency's items is refused by design, so the wire is named for
+    what it is — cash in a currency with nothing open against it —
+    rather than filed as merely unidentified. Returns None when the
+    broker does hold open items in the line's currency (the wire is
+    then unexplained, not mismatched) or holds nothing open at all
+    (the ordinary T5 case)."""
+    book = [r for r in ctx.receivables.values()
+            if r.broker_id == broker.broker_id and r.status != PolicyStatus.CANCELLED]
+    open_in_currency = any(
+        r.currency == line.currency and r.open_installments() for r in book)
+    open_elsewhere = any(
+        r.currency != line.currency and r.open_installments() for r in book)
+    if open_in_currency or not open_elsewhere:
+        return None
+    outcome.record_attempt(
+        "CURRENCY_CHECK", "raised",
+        f"CURRENCY_NO_OPEN_ITEMS: {broker.name} has open items, but "
+        f"none denominated in {line.currency}; the wire is not "
+        "converted to hunt a match in another currency.")
+    outcome.exceptions.append(
+        _exc(line, ExceptionCode.CURRENCY_NO_OPEN_ITEMS, line.amount,
+             f"{broker.name} has no open items denominated in {line.currency}. "
+             "Premium cash is matched in its own currency only, so the wire "
+             f"is held in suspense in {line.currency} rather than converted "
+             "against the broker's open items in another currency.",
+             broker_id=broker.broker_id)
+    )
+    outcome.suspense_amount = line.amount
+    return _finish(line, outcome)
+
+
 def _finish(line: BankLine, outcome: LineOutcome) -> LineOutcome:
+    # Every allocation is stamped with the conversion made in code
+    # at this moment: the line's currency, and for a non-functional
+    # line the governed rate in force on the line's value date with
+    # the functional amount it produces. The stamp is the record —
+    # reports read it, a reversal replays it, and no later rate move
+    # restates it.
+    for alloc in outcome.allocations:
+        alloc.currency = line.currency
+        if line.currency != FUNCTIONAL_CURRENCY:
+            alloc.fx_rate = rate_on(line.currency, line.value_date)
+            alloc.functional_amount = to_functional(
+                alloc.amount, line.currency, line.value_date)
     accounted = outcome.allocated_total + outcome.offset_total + outcome.suspense_amount
     assert accounted == line.amount, (
         f"{line.bank_line_id}: allocations {outcome.allocated_total} + payable offsets "

@@ -17,6 +17,9 @@ looks for pairs the CODE can prove:
   broker's book for a broker payer; the insured's own direct
   policies for a direct payer — combinations never cross payers,
   and never cross brokers);
+- both legs and the target share one currency: a pair is priced in
+  the currency it arrived in, and two wires in different currencies
+  are never added together to reach a billed balance;
 - the pair settles the installment EXACTLY: each leg is priced
   with the commission rate in force on its own value date (the
   gate's own gross-up arithmetic, `cents(leg / (1 − rate))`), and
@@ -49,6 +52,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from . import webhooks
+from .fx import FUNCTIONAL_CURRENCY, rate_on, to_functional
 from .matcher import _norm
 from .models import (
     Allocation,
@@ -191,6 +195,7 @@ def find_combinations(store: Store) -> list[dict]:
             available = [
                 (item, line) for item, line in legs
                 if line.bank_line_id not in used_legs
+                and line.currency == rec.currency
             ]
             pair = None
             for i in range(len(available)):
@@ -219,9 +224,11 @@ def find_combinations(store: Store) -> list[dict]:
                 "legs": [
                     {"suspense_id": item_a.suspense_id, "bank_line_id": line_a.bank_line_id,
                      "value_date": line_a.value_date, "amount": line_a.amount,
+                     "currency": line_a.currency,
                      "rate": rate_a, "gross_value": gross_a},
                     {"suspense_id": item_b.suspense_id, "bank_line_id": line_b.bank_line_id,
                      "value_date": line_b.value_date, "amount": line_b.amount,
+                     "currency": line_b.currency,
                      "rate": rate_b, "gross_value": gross_b},
                 ],
                 "cash_total": line_a.amount + line_b.amount,
@@ -262,14 +269,22 @@ def propose_combinations(store: Store, actor: str, as_of: date) -> dict:
             "applies only if the gate approves both legs together."
         )
         for leg in combo["legs"]:
+            alloc = Allocation(
+                bank_line_id=leg["bank_line_id"],
+                policy_number=combo["policy_number"],
+                installment_id=combo["installment_id"],
+                amount=leg["amount"], tier=None, note=note,
+                currency=leg["currency"],
+            )
+            if leg["currency"] != FUNCTIONAL_CURRENCY:
+                # The recorded conversion, as at the matcher: the
+                # rate in force on the leg's own value date.
+                alloc.fx_rate = rate_on(leg["currency"], leg["value_date"])
+                alloc.functional_amount = to_functional(
+                    leg["amount"], leg["currency"], leg["value_date"])
             pack.entries.append(PostingEntry(
                 kind="allocation",
-                allocation=Allocation(
-                    bank_line_id=leg["bank_line_id"],
-                    policy_number=combo["policy_number"],
-                    installment_id=combo["installment_id"],
-                    amount=leg["amount"], tier=None, note=note,
-                ),
+                allocation=alloc,
                 proposal_kind="combination",
                 proposed_by=COMBINATION_BACKEND,
                 combination_id=combo["combination_id"],

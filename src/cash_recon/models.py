@@ -308,6 +308,7 @@ class PayableOffset(BaseModel):
     payable_id: str
     policy_number: str
     amount: Decimal
+    currency: str = "USD"  # the bank line's — offsets only ever meet a same-currency payable
 
 
 class NonPremiumEntry(BaseModel):

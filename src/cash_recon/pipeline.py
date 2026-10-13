@@ -269,7 +269,8 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
                 reason = outcome.exceptions[0].code.value if outcome.exceptions else "Unallocated remainder"
                 store.add_suspense(SuspenseItem(
                     suspense_id=f"SUS-{line.bank_line_id}", bank_line_id=line.bank_line_id,
-                    amount=outcome.suspense_amount, received_date=line.value_date, reason=reason))
+                    amount=outcome.suspense_amount, received_date=line.value_date, reason=reason,
+                    currency=line.currency))
             store.audit(AuditEvent(at=_now(), actor="matcher", action="line_matched", subject=line.bank_line_id,
                                    detail=f"tier={outcome.tier}, allocated={outcome.allocated_total}, "
                                           f"netted={outcome.offset_total}, "

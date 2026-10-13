@@ -208,6 +208,7 @@ def record_return(store: Store, bank_line_id: str, reason, actor: str,
         return_date=on_date,
         recorded_by=actor,
         amount=line.amount,
+        currency=line.currency,
         pack_ids=[p.pack_id for p in packs],
         detail=(
             f"{reason.value}: the bank returned the full {line.amount} of {bank_line_id} "

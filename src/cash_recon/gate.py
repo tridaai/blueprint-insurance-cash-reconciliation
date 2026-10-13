@@ -165,6 +165,13 @@ def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) 
             f"→ {new_policy}/{new_installment} {new_amount}"
         )
         alloc.policy_number, alloc.installment_id, alloc.amount = new_policy, new_installment, new_amount
+        if alloc.fx_rate is not None:
+            # The edit moves cash, not currencies: the allocation
+            # keeps the conversion rate recorded when it was created
+            # (the rate in force on its bank line's value date), and
+            # the functional amount follows the edited cash at that
+            # same recorded rate — never at today's.
+            alloc.functional_amount = cents(alloc.amount * alloc.fx_rate)
 
     if not changes:
         raise GateError("the edit changes nothing: every adjustment restates its entry")
@@ -440,33 +447,44 @@ def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
 
 def posting_file(pack: PostingPack) -> str:
     """The approved pack as a CSV posting file: what a human uploads
-    to the accounting system. Rejected/proposed packs produce none."""
+    to the accounting system. Rejected/proposed packs produce none.
+    Every row names the currency its amount is denominated in, and a
+    foreign-currency allocation also carries the conversion recorded
+    when it was created — the rate and the functional amount — so
+    the hand-off never mixes denominations silently."""
     if pack.status.value != "approved":
         raise GateError("a posting file exists only for an approved pack")
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["pack_id", "value_date", "kind", "policy_number", "installment_id",
-                     "bank_line_id", "amount", "tier", "approved_by"])
+                     "bank_line_id", "amount", "tier", "approved_by",
+                     "currency", "fx_rate", "functional_amount"])
     for entry in pack.entries:
         if entry.kind == "allocation" and entry.allocation:
             a = entry.allocation
             writer.writerow([pack.pack_id, pack.value_date.isoformat(), "premium_cash",
                              a.policy_number, a.installment_id, a.bank_line_id,
                              f"{a.amount:.2f}", a.tier.value if a.tier else "PROPOSED",
-                             ";".join(pack.approvals)])
+                             ";".join(pack.approvals),
+                             a.currency,
+                             str(a.fx_rate) if a.fx_rate is not None else "",
+                             f"{(a.functional_amount if a.functional_amount is not None else a.amount):.2f}"])
         elif entry.kind == "non_premium" and entry.non_premium:
             np = entry.non_premium
             writer.writerow([pack.pack_id, pack.value_date.isoformat(), "non_premium",
                              "", np.kind, np.bank_line_id,
                              f"{np.amount:.2f}", "",
-                             ";".join(pack.approvals)])
+                             ";".join(pack.approvals),
+                             np.currency, "", f"{np.amount:.2f}"])
         elif entry.kind == "payable_offset" and entry.payable_offset:
             o = entry.payable_offset
             writer.writerow([pack.pack_id, pack.value_date.isoformat(), "return_premium_offset",
                              o.policy_number, o.payable_id, o.bank_line_id,
-                             f"{o.amount:.2f}", "", ";".join(pack.approvals)])
+                             f"{o.amount:.2f}", "", ";".join(pack.approvals),
+                             o.currency, "", f"{o.amount:.2f}"])
         else:
             writer.writerow([pack.pack_id, pack.value_date.isoformat(), "write_off",
                              entry.write_off_policy or "", "", "",
-                             f"{entry.write_off_amount:.2f}", "", ";".join(pack.approvals)])
+                             f"{entry.write_off_amount:.2f}", "", ";".join(pack.approvals),
+                             "", "", ""])
     return buf.getvalue()
