@@ -273,8 +273,21 @@ class SuspenseItem(BaseModel):
     # line's. Suspense is held per currency: an EUR balance is never
     # added to a USD one anywhere in the reports.
     currency: str = "USD"
-    status: str = "open"  # open | resolved (closed by the re-match pass)
+    status: str = "open"  # open | resolved | dispositioned
     resolved_on: date | None = None
+    # Set when the gate approved a suspense disposition for this
+    # item (dispositions.py): the terminal exit for cash that aged
+    # past every attempt to identify it. The kind says where the
+    # cash went on the books — WRITE_OFF_INCOME (to miscellaneous
+    # income) or ESCHEAT_REVIEW (held for unclaimed-property
+    # review; the state is owed to someone, so the item stays
+    # visible on the escheat list). Disposition is a state, never
+    # a deletion: the item, its reason, and its pack stay on the
+    # record. Older records carry none of these fields.
+    disposition_kind: str | None = None  # "WRITE_OFF_INCOME" | "ESCHEAT_REVIEW"
+    dispositioned_on: date | None = None
+    disposition_pack_id: str | None = None
+    disposition_reason: str | None = None
 
     def age_days(self, as_of: date) -> int:
         return (as_of - self.received_date).days
@@ -420,6 +433,36 @@ class ResolutionInfo(BaseModel):
     chosen_candidate: str | None = None
 
 
+class SuspenseDisposition(BaseModel):
+    """One suspense item proposed for disposition on a
+    PACK-DISPOSE pack: the cash, the disposition KIND the
+    assembler proposes for it, and the assembler's written reason
+    for this item. The two kinds are different destinations, not
+    severities: WRITE_OFF_INCOME takes the cash to miscellaneous
+    income (it leaves the suspense identity through the close
+    pack's disposed term, labelled as income); ESCHEAT_REVIEW
+    moves it to the unclaimed-property review list — the money is
+    owed to someone the desk could not find, and it stays visible
+    there, never counted as income."""
+
+    suspense_id: str
+    bank_line_id: str
+    amount: Decimal
+    currency: str = "USD"
+    kind: str  # "WRITE_OFF_INCOME" | "ESCHEAT_REVIEW"
+    reason: str  # the assembler's written reason, per item
+
+
+class DispositionInfo(BaseModel):
+    """The disposition record carried on a PACK-DISPOSE pack:
+    the items the pack proposes to dispose of, each with its
+    kind and the assembler's reason. The pack carries no posting
+    entries — approval moves the items themselves into their
+    disposition state, under dual control, always."""
+
+    items: list[SuspenseDisposition] = Field(default_factory=list)
+
+
 class PostingPack(BaseModel):
     pack_id: str
     value_date: date
@@ -441,6 +484,13 @@ class PostingPack(BaseModel):
     # the returns replay) sees the one settlement that happened,
     # never the sum of the roads not taken.
     resolution: ResolutionInfo | None = None
+    # Set on a suspense disposition pack (PACK-DISPOSE-*): the
+    # aged items the pack proposes to dispose of, each with a
+    # kind and a written reason. Such a pack never carries
+    # entries and never applies cash: approval moves the items
+    # out of open suspense into their disposition state, and it
+    # always takes two approvers, neither of them the assembler.
+    disposition: DispositionInfo | None = None
 
     @property
     def allocation_total(self) -> Decimal:
@@ -469,6 +519,12 @@ class PostingPack(BaseModel):
             (e.non_premium.amount for e in self.entries if e.non_premium),
             Decimal("0.00"),
         )
+
+    @property
+    def disposition_total(self) -> Decimal:
+        if self.disposition is None:
+            return Decimal("0.00")
+        return sum((d.amount for d in self.disposition.items), Decimal("0.00"))
 
 
 class ReturnUnwind(BaseModel):

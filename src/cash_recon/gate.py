@@ -8,6 +8,10 @@ it. The rules are code, not convention:
 - Delta write-offs above the configured single-approver limit need a
   second approver, different from both the first approver and the
   assembler.
+- A suspense disposition pack (PACK-DISPOSE-*) is dual control
+  ALWAYS: two approvers, neither of them the assembler, whatever
+  the amounts — disposing of unidentified cash is a decision one
+  person never makes alone.
 - Approval is the only moment receivables change: allocations are
   applied to installments, statuses move, and every applied cent keeps
   its trace — bank line, allocation, pack, approver.
@@ -121,6 +125,13 @@ def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) 
             "rejected and the item scanned again against the books as "
             "they then stand"
         )
+    if pack.disposition is not None:
+        raise GateError(
+            "a disposition pack's items are edited by nobody: the two "
+            "approvers decide the items as proposed — kind, amount and "
+            "reason — or the pack is rejected and the dispositions "
+            "proposed again"
+        )
     if not adjustments:
         raise GateError("an edit names at least one adjustment")
 
@@ -211,6 +222,10 @@ def add_write_off(store, pack_id: str, exception_id: str, actor: str) -> Posting
         raise GateError(
             "write-offs do not attach to a resolution pack: it decides what "
             "unidentified cash is, not what a shortfall costs")
+    if pack.disposition is not None:
+        raise GateError(
+            "write-offs do not attach to a disposition pack: it decides "
+            "where stale suspense cash goes, not what a shortfall costs")
     exc = next((e for e in store.exceptions() if e.exception_id == exception_id), None)
     if exc is None:
         raise GateError(f"no such exception: {exception_id}")
@@ -248,7 +263,16 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
     settlement that happened, never the sum of the roads not
     taken. A choice on a pack that carries no alternates, or no
     choice on a resolution pack, is refused: the choice is the
-    decision."""
+    decision.
+
+    A disposition pack is decided under dual control, always:
+    a second approver, different from the approver and from the
+    assembler, whatever the amounts. Approval re-verifies every
+    item still stands open at its proposed amount, then moves
+    the items into their disposition state and closes their
+    lines' open exceptions; nothing is applied to a receivable,
+    because a disposition settles no policy — it ends the
+    suspense, on the record."""
     pack = store.pack(pack_id)
     if pack is None:
         raise GateError(f"no such pack: {pack_id}")
@@ -256,6 +280,30 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
         raise GateError(f"pack {pack_id} is {pack.status.value}; only a proposed pack can be approved")
     if not approver or approver == pack.assembled_by:
         raise GateError("self-approval refused: the approver must differ from the assembler")
+    if pack.disposition is not None:
+        # Dual control, always: a disposition takes cash off the
+        # desk's open work without settling a policy, so no single
+        # person — and never the assembler, in either chair — can
+        # approve one, whatever the amounts. This is not the
+        # write-off rule below (a threshold); it is a class rule.
+        if not second_approver:
+            raise GateError(
+                f"pack {pack_id} is a suspense disposition pack: "
+                "disposing of unidentified cash is a dual-control act "
+                "and always needs a second approver, whatever the "
+                "amounts — one person never disposes of cash alone"
+            )
+        if second_approver == approver:
+            raise GateError(
+                "the second approver of a disposition must differ "
+                "from the approver: two people, two decisions"
+            )
+        if second_approver == pack.assembled_by:
+            raise GateError(
+                "the assembler of a disposition pack can be neither "
+                "approver: the second approver must differ from the "
+                "assembler as well as from the approver"
+            )
     if pack.write_off_total > policy.write_off_single_limit:
         if not second_approver:
             raise GateError(
@@ -394,6 +442,28 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
                 "was assembled"
             )
 
+    # A disposition pack is re-verified before anything is
+    # written, with the same discipline: each item was eligible
+    # when proposed, and if the cash has since been worked — the
+    # item resolved, or its amount moved — the proposal the two
+    # approvers are looking at is stale, and the pack is refused
+    # whole rather than disposing of cash that is no longer there.
+    if pack.disposition is not None:
+        items_now = {i.suspense_id: i for i in store.suspense_items()}
+        for d in pack.disposition.items:
+            item_now = items_now.get(d.suspense_id)
+            if item_now is None or item_now.status != "open" \
+                    or item_now.amount != d.amount:
+                raise GateError(
+                    f"disposition of {d.suspense_id} no longer stands: "
+                    f"the item is "
+                    f"{item_now.status if item_now else 'gone'} at "
+                    f"{item_now.amount if item_now else 'nothing'} "
+                    f"against the {d.amount} proposed; the books moved "
+                    "since the pack was assembled — the pack is refused "
+                    "whole; reject it and propose the dispositions again"
+                )
+
     pack.approvals = [approver] + ([second_approver] if second_approver else [])
     pack.status = pack.status.APPROVED
     pack.decided_at = _now()
@@ -521,6 +591,41 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
                    + (f"; candidates {', '.join(lapsed)} lapsed to the "
                       "pack's record" if lapsed else "")))
 
+    # A disposition approval moves the items themselves: out of
+    # open suspense, into their disposition state — terminal, and
+    # on the record with the kind, the assembler's reason, the
+    # pack, and both approvers. The items are not deleted and
+    # their amounts do not change; the close pack reads the state
+    # and takes the cash out of the suspense identity through its
+    # disposed term, from the pack's value date. The line's open
+    # exceptions close with the item, as a combination settlement
+    # closes its legs' exceptions: the cash they were about has
+    # been disposed of, under dual control, in the open.
+    if pack.disposition is not None:
+        items_now = {i.suspense_id: i for i in store.suspense_items()}
+        for d in pack.disposition.items:
+            item = items_now[d.suspense_id]
+            item.status = "dispositioned"
+            item.disposition_kind = d.kind
+            item.dispositioned_on = pack.value_date
+            item.disposition_pack_id = pack_id
+            item.disposition_reason = d.reason
+            store.save_suspense(item)
+            for exc in store.exceptions(status="open"):
+                if exc.bank_line_id == item.bank_line_id:
+                    exc.status = "resolved"
+                    store.update_exception(exc)
+            store.audit(AuditEvent(
+                at=_now(), actor=approver,
+                action="suspense_disposition_decided",
+                subject=d.suspense_id,
+                detail=f"disposition pack {pack_id} approved under dual "
+                       f"control by {approver} and {second_approver} "
+                       f"(assembled by {pack.assembled_by}): {d.amount} "
+                       f"{d.currency} to {d.kind} — {d.reason}. The item "
+                       "leaves open suspense as of the pack's value date "
+                       f"{pack.value_date}; it stays on the record."))
+
     store.audit(AuditEvent(at=_now(), actor=approver, action="pack_approved", subject=pack_id,
                            detail=f"allocations {pack.allocation_total}, write-offs {pack.write_off_total}, "
                                   f"payable offsets {pack.offset_total}, "
@@ -530,6 +635,7 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
         "write_offs": as_str(pack.write_off_total),
         "payable_offsets": as_str(pack.offset_total),
         "non_premium": as_str(pack.non_premium_total),
+        "suspense_dispositions": as_str(pack.disposition_total),
     }, pack_kind="posting")
     return pack
 
@@ -616,11 +722,26 @@ def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
             detail=f"resolution pack {pack_id} rejected by {actor}: {reason} "
                    f"Its {len(info.candidates)} candidate(s) lapse to the "
                    "pack's record; the cash stays in suspense."))
+    if pack.disposition is not None:
+        # A rejected disposition changes nothing: the items were
+        # never held, so they stand open and aging, exactly as
+        # they did while the pack stood proposed. The refusal
+        # lands on each item's own trail, beside the proposal.
+        for d in pack.disposition.items:
+            store.audit(AuditEvent(
+                at=_now(), actor=actor,
+                action="suspense_disposition_decided",
+                subject=d.suspense_id,
+                detail=f"disposition pack {pack_id} rejected by {actor}: "
+                       f"{reason} The proposed {d.kind} disposition of "
+                       f"{d.amount} {d.currency} does not stand; the "
+                       "item stays open in suspense."))
     webhooks.emit(store, "pack_rejected", pack_id, actor, {
         "allocations": as_str(pack.allocation_total),
         "write_offs": as_str(pack.write_off_total),
         "payable_offsets": as_str(pack.offset_total),
         "non_premium": as_str(pack.non_premium_total),
+        "suspense_dispositions": as_str(pack.disposition_total),
     }, pack_kind="posting")
     return pack
 
@@ -639,6 +760,21 @@ def posting_file(pack: PostingPack) -> str:
     writer.writerow(["pack_id", "value_date", "kind", "policy_number", "installment_id",
                      "bank_line_id", "amount", "tier", "approved_by",
                      "currency", "fx_rate", "functional_amount"])
+    if pack.disposition is not None:
+        # A disposition pack carries no entries: its rows are the
+        # dispositions themselves — the write-offs to income a
+        # human posts from this file, and the escheat reviews,
+        # which post to the unclaimed-property holding, never to
+        # income. The kind rides in the installment column, as a
+        # non-premium entry's sub-kind does.
+        for d in pack.disposition.items:
+            writer.writerow([pack.pack_id, pack.value_date.isoformat(),
+                             "suspense_disposition",
+                             "", d.kind, d.bank_line_id,
+                             f"{d.amount:.2f}", "",
+                             ";".join(pack.approvals),
+                             d.currency, "", f"{d.amount:.2f}"])
+        return buf.getvalue()
     for entry in pack.entries:
         if entry.kind == "allocation" and entry.allocation:
             a = entry.allocation

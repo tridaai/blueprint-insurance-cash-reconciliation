@@ -22,6 +22,15 @@ class Policy:
     stale_suspense_days: int = 30
     netting_tolerance: Decimal = Decimal("0.01")
     duplicate_window_days: int = 5
+    # Suspense disposition (dispositions.py): unapplied cash that
+    # has aged past every attempt to identify it may be proposed
+    # for disposition — written off to miscellaneous income, or
+    # moved to escheat review — but only once it is at least this
+    # old. The floor sits deliberately beyond the stale marker
+    # above: stale at 30 days is a prompt to work an item;
+    # disposition at 90 is the desk admitting, under dual control,
+    # that the work is done.
+    suspense_disposition_min_age_days: int = 90
     # Checkpoint retention (checkpoints.py): the day-run graph writes
     # LangGraph checkpoints on every run, and the saver's tables grow
     # without bound if nobody prunes them. The governed shape: keep
@@ -55,6 +64,10 @@ class Policy:
             netting_tolerance=dec("NETTING_TOLERANCE", cls.netting_tolerance),
             duplicate_window_days=num(
                 "DUPLICATE_WINDOW_DAYS", cls.duplicate_window_days
+            ),
+            suspense_disposition_min_age_days=num(
+                "SUSPENSE_DISPOSITION_MIN_AGE_DAYS",
+                cls.suspense_disposition_min_age_days,
             ),
             checkpoint_keep_per_thread=num(
                 "CHECKPOINT_KEEP_PER_THREAD", cls.checkpoint_keep_per_thread
