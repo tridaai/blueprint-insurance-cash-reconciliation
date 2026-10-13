@@ -70,6 +70,7 @@ make test        # pytest
 make evals       # the golden-case gate (67 cases, gold by construction)
 make evals-live  # the live reading set — needs a provider key (SKIPPED-LIVE without one)
 make serve       # API + console on http://localhost:8000
+make prod-smoke  # prove the production profile against real PostgreSQL + S3 (env required)
 ```
 
 No uv? `python3 -m venv .venv && source .venv/bin/activate`, then
@@ -104,6 +105,59 @@ checkpoints, pgvector document embeddings) and an S3-compatible store
 (SeaweedFS's gateway, service name `minio`) holding the remittance
 documents. The API applies the numbered SQL migrations in
 `migrations/` on startup.
+
+## Verifying a production deployment
+
+`make prod-smoke` turns the production proof into one repeatable
+command. Point it at real services — PostgreSQL with the pgvector
+extension and any S3-compatible store; the topology above, or the
+same services stood up natively:
+
+```bash
+DATABASE_URL=postgresql://cashrecon:cashrecon@localhost:5433/cashrecon_smoke \
+S3_BUCKET=remittance-documents \
+S3_ENDPOINT_URL=http://localhost:8333 \
+S3_ACCESS_KEY_ID=minioadmin \
+S3_SECRET_ACCESS_KEY=minioadmin \
+make prod-smoke
+```
+
+Use a **fresh database**: the smoke seeds the synthetic month and
+refuses a store that already holds bank lines rather than trampling
+an existing book. It deletes nothing; what it creates stays for
+inspection. The steps, each failing loudly with its name:
+
+- **profile** — the env names the production profile. Without
+  `DATABASE_URL` + `S3_*` the script refuses outright: it will not
+  pass against the SQLite local profile or an in-memory object store.
+- **api-readiness** — the real API boots against those stores and
+  `/readiness` must report ready, the postgres profile, and the S3
+  object store.
+- **seed** — the dataset lands through the production stores:
+  records and embeddings in Postgres, documents in the bucket.
+- **run-day** — one September day runs through the real pipeline
+  (LangGraph checkpointer included) and its report must foot.
+- **approve** — the day's pack is approved at the gate by a named
+  controller and stands approved.
+- **close-pack-digest** — the September close pack is assembled
+  twice; the SHA-256 digests must be identical.
+- **document-round-trip** — a remittance document reads back from
+  the object store byte-identical to what the pipeline ingested.
+
+Two deployment notes the verification surfaced:
+
+- **The S3 endpoint must know the app's identity.** The client
+  signs every request with `S3_ACCESS_KEY_ID` /
+  `S3_SECRET_ACCESS_KEY`, so those credentials must be an identity
+  configured on the endpoint (an IAM key pair on real S3; an
+  identity in SeaweedFS's S3 configuration). A SeaweedFS with no
+  identity configured rejects the signed requests.
+- **Localhost endpoints must bypass any HTTP proxy.** When the app
+  runs with `http_proxy` set, service endpoints on localhost (the
+  S3 gateway, a self-hosted NIM, a local model server) must be in
+  `NO_PROXY`, or requests route to the proxy and never arrive. The
+  smoke script extends `NO_PROXY` for its own checks and says so
+  in its profile step.
 
 ## How matching works
 

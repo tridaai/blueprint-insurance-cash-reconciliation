@@ -357,6 +357,12 @@ webhook state (configured or disabled) so an operator can tell
   are applied by the store at startup; `0002` adds the pgvector
   embedding table, `0003` the payment-returns table, `0004` the
   return-premium tables (cancellations, payables, payout packs).
+  The embedding table's `vector(384)` is a contract every store
+  enforces in code at `set_embedding` — `EmbeddingDimensionError`,
+  naming the expected dimension — so the JSON-backed stores refuse
+  a wrong-dimension vector with the same deliberate error instead
+  of tolerating what the schema would reject, and the conformance
+  battery's fixture is a real 384-dimension vector on every leg.
   LangGraph
   checkpoints use the Postgres saver in the same database when
   `DATABASE_URL` is set. The allocations table is an index of pack
@@ -386,6 +392,13 @@ webhook state (configured or disabled) so an operator can tell
   and re-checked by the API at startup.
 - **In-memory doubles** implement the same protocol for tests and
   the eval gate. They are test doubles only.
+
+The production profile is provable on demand rather than by
+inspection: `make prod-smoke` (`scripts/prod_smoke.py`) boots the
+API against live PostgreSQL + S3, seeds a fresh database, runs and
+approves a day, compares close-pack digests across regeneration,
+and round-trips a document through the object store — refusing to
+run at all against the local profiles it is not proving.
 
 ## Configuration
 
