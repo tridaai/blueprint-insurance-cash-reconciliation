@@ -21,11 +21,11 @@ from pathlib import Path
 
 from .close_pack import close_pack_export
 from .config import Policy as PolicyConfig
-from .dataset import build_dataset
+from .dataset import build_dataset, build_october_dataset
 from .gate import approve_pack
 from .llm import OfflineReader
 from .objects import InMemoryObjectStore
-from .pipeline import ingest_dataset, run_day
+from .pipeline import ingest_dataset, ingest_october_dataset, run_day
 from .report import broker_scorecard, day_report, suspense_aging
 from .store import SqliteStore, make_store
 
@@ -63,6 +63,20 @@ def main() -> None:
         print(line)
         for note in result["document_notes"]:
             print(f"    · {note}")
+
+    october = build_october_dataset()
+    ingest_october_dataset(store, objects, october)
+    print("\nOctober 2026 — a second month on the same books "
+          "(Fernway's rate changed mid-book; NSP-1003 renewed)\n")
+    for day in sorted({l.value_date for l in october.bank_lines}):
+        result = run_day(store, objects, reader, policy, day, actor=ASSEMBLER)
+        rep = result["report"]
+        line = (f"{day}  bank {rep['bank_total']:>10}  allocated {rep['allocated_total']:>10}  "
+                f"suspense {rep['suspense_total']:>9}  footing {'OK' if rep['footing_ok'] else 'FAIL'}")
+        if result["pack_id"]:
+            approve_pack(store, result["pack_id"], CONTROLLER, policy)
+            line += f"  pack approved by {CONTROLLER}"
+        print(line)
 
     print("\nOpen exceptions:")
     for exc in store.exceptions(status="open"):

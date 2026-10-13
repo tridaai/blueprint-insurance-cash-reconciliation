@@ -29,6 +29,7 @@ from .models import (
     Broker,
     Installment,
     PolicyStatus,
+    RatePeriod,
     Receivable,
     Remittance,
     SuspenseItem,
@@ -363,3 +364,126 @@ def build_dataset() -> Dataset:
     return Dataset(brokers=brokers, receivables=receivables, bank_lines=bank_lines,
                    remittances=remittances, opening_suspense=opening_suspense,
                    gold=gold, remittance_gold=remittance_gold)
+
+
+# ---------------------------------------------------------------------------
+# October 2026: a second month on the same books.
+#
+# October is not September warmed over; each planted pattern is new:
+#
+# - Fernway's commission rate CHANGED mid-book — 11% to 13% on
+#   2026-10-15, carried as a rate history. A September policy Fernway
+#   settles in early October (NSP-1007) still nets at the 11% in
+#   force for that period; new October policies net at 13% once the
+#   change is in force; a wire netted at the OLD rate after the
+#   change no longer settles the bill exactly; and a wire netted at
+#   a rate nobody ever contracted (15%) is a netting mismatch.
+# - NSP-1003 RENEWS: a second term's installments land on the same
+#   policy number, and Bayline's named-installment wire settles the
+#   renewal installment it names — not the older ones still open.
+# - One wire (BL-106) is exactly two policies' net dues summed —
+#   but they sit on two different brokers' books (Alder's NSP-1038
+#   and Bayline's NSP-1030) while the wire came from Alder alone.
+#   Cross-broker allocation is invalid in this design, so the wire
+#   is unidentified and the whole amount goes to suspense.
+# - One ordinary new direct policy (NSP-1048) pays in full.
+#
+# The October close must open with September's closing suspense to
+# the cent; the evals pin that continuity as a control.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OctoberDataset:
+    brokers: list[Broker]                       # records whose terms changed (Fernway)
+    new_receivables: list[Receivable]           # policies first booked in October
+    renewals: dict[str, dict]                   # policy -> {installments, term_start, term_end}
+    bank_lines: list[BankLine]
+    gold: dict[str, GoldOutcome]
+
+
+def _term_policy(number: str, insured: str, broker_id: str | None, premium: Decimal) -> Receivable:
+    return Receivable(
+        policy_number=number, insured_name=insured, broker_id=broker_id,
+        status=PolicyStatus.ACTIVE,
+        installments=[Installment(installment_id=f"{number}-I1", policy_number=number,
+                                  sequence=1, due_date=date(2026, 10, 1), amount_due=premium)],
+        term_start=date(2026, 10, 1), term_end=date(2027, 10, 1),
+    )
+
+
+def build_october_dataset() -> OctoberDataset:
+    fernway = Broker(
+        broker_id="BRK-FERN", name="Fernway Insurance Group", commission_rate=D("0.13"),
+        rate_history=[
+            RatePeriod(effective_from=date(2026, 1, 1), rate=D("0.11")),
+            RatePeriod(effective_from=date(2026, 10, 15), rate=D("0.13")),
+        ],
+    )
+    new_receivables = [
+        _term_policy("NSP-1046", "Cedarline Physiotherapy", "BRK-FERN", D("8000.00")),
+        _term_policy("NSP-1047", "Bayside Chandlery", "BRK-FERN", D("6400.00")),
+        _term_policy("NSP-1049", "Tallow & Wick Chandlers", "BRK-FERN", D("5000.00")),
+        _term_policy("NSP-1048", "Wexford Tutoring LLC", None, D("3150.00")),
+    ]
+    renewals = {
+        "NSP-1003": {
+            "term_start": date(2026, 10, 1),
+            "term_end": date(2027, 10, 1),
+            "installments": [
+                Installment(installment_id=f"NSP-1003-I{n}", policy_number="NSP-1003",
+                            sequence=n, due_date=due, amount_due=D("2600.00"))
+                for n, due in ((5, date(2026, 10, 1)), (6, date(2026, 11, 1)),
+                               (7, date(2026, 12, 1)), (8, date(2027, 1, 1)))
+            ],
+        }
+    }
+
+    fern = "Fernway Insurance Group"
+    bank_lines = [
+        # Oct 2 — a new direct policy pays its premium in full.
+        BankLine(bank_line_id="BL-107", value_date=date(2026, 10, 2), amount=D("3150.00"),
+                 payer_name="Wexford Tutoring LLC", reference="NSP-1048", narrative=""),
+        # Oct 5 — the renewal wire names installment 5 of NSP-1003 and
+        # settles exactly that one, at Bayline's 10%: 2,600 × 0.9.
+        BankLine(bank_line_id="BL-105", value_date=date(2026, 10, 5), amount=D("2340.00"),
+                 payer_name="Bayline Risk Partners", reference="NSP-1003-I5", narrative=""),
+        # Oct 6 — Fernway settles a September policy before the rate
+        # change: 4,410.00 nets at the 11% in force, 3,924.90.
+        BankLine(bank_line_id="BL-101", value_date=date(2026, 10, 6), amount=D("3924.90"),
+                 payer_name=fern, reference="NSP-1007", narrative=""),
+        # Oct 13 — Alder's wire is exactly NSP-1038's first-installment
+        # net (3,356.76 at 12.5%) plus NSP-1030's net (5,076.00 at
+        # Bayline's 10%) — two brokers' books in one wire from one
+        # broker. It must not be allocated across brokers.
+        BankLine(bank_line_id="BL-106", value_date=date(2026, 10, 13), amount=D("8432.76"),
+                 payer_name="Alder & Voss Insurance Brokers", reference=None,
+                 narrative="monthly settlement — multiple accounts"),
+        # Oct 20 — a new Fernway policy nets at the NEW 13%: 8,000 × 0.87.
+        BankLine(bank_line_id="BL-102", value_date=date(2026, 10, 20), amount=D("6960.00"),
+                 payer_name=fern, reference="NSP-1046", narrative=""),
+        # Oct 21 — Fernway nets NSP-1047 at the OLD 11% after the
+        # change: 6,400 × 0.89 = 5,696.00 against a net due of
+        # 5,568.00 at the 13% in force. The bill settles; 128.00 is
+        # overpaid into suspense — the old rate no longer applies.
+        BankLine(bank_line_id="BL-103", value_date=date(2026, 10, 21), amount=D("5696.00"),
+                 payer_name=fern, reference="NSP-1047", narrative=""),
+        # Oct 22 — Fernway nets NSP-1049 at 15%, a rate no period of
+        # the contract ever held: a clean implied rate that is not
+        # the contracted one. Netting mismatch; the cash is held.
+        BankLine(bank_line_id="BL-104", value_date=date(2026, 10, 22), amount=D("4250.00"),
+                 payer_name=fern, reference="NSP-1049", narrative=""),
+    ]
+    gold = {
+        "BL-107": GoldOutcome(tier="T1_EXACT", allocations={"NSP-1048": "3150.00"}, auto=True),
+        "BL-105": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1003": "2340.00"}),
+        "BL-101": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1007": "3924.90"}),
+        "BL-106": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="8432.76"),
+        "BL-102": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1046": "6960.00"}),
+        "BL-103": GoldOutcome(tier="T3_REFERENCE", exceptions=["OVERPAID"],
+                              allocations={"NSP-1047": "5568.00"}, suspense="128.00"),
+        "BL-104": GoldOutcome(exceptions=["NETTING_MISMATCH"], suspense="4250.00"),
+    }
+    bank_lines.sort(key=lambda b: (b.value_date, b.bank_line_id))
+    return OctoberDataset(brokers=[fernway], new_receivables=new_receivables,
+                          renewals=renewals, bank_lines=bank_lines, gold=gold)

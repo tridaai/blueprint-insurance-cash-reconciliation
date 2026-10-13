@@ -67,6 +67,36 @@ def ingest_dataset(store: Store, objects: ObjectStore, dataset: Dataset) -> None
                                   f"{len(dataset.remittances)} remittances"))
 
 
+def ingest_october_dataset(store: Store, objects: ObjectStore, dataset) -> None:
+    """Load October on top of September's books: the broker whose
+    terms changed, the new policies, the bank lines — and the
+    renewal, which is applied to the policy record already on the
+    books so its September applications survive untouched. The
+    renewal is idempotent: installments already present are not
+    booked twice."""
+    for broker in dataset.brokers:
+        store.upsert_broker(broker)
+    for rec in dataset.new_receivables:
+        store.upsert_receivable(rec)
+    for policy_number, renewal in dataset.renewals.items():
+        rec = store.receivable(policy_number)
+        if rec is None:
+            raise ValueError(f"renewal names a policy not on the books: {policy_number}")
+        have = {i.installment_id for i in rec.installments}
+        fresh = [i for i in renewal["installments"] if i.installment_id not in have]
+        if fresh:
+            rec.installments = [*rec.installments, *fresh]
+            rec.term_start = renewal["term_start"]
+            rec.term_end = renewal["term_end"]
+            store.upsert_receivable(rec)
+    for line in dataset.bank_lines:
+        store.add_bank_line(line)
+    store.audit(AuditEvent(at=_now(), actor="ingest", action="dataset_loaded", subject="northgate-october",
+                           detail=f"October: {len(dataset.new_receivables)} new policies, "
+                                  f"{len(dataset.bank_lines)} bank lines, renewals for "
+                                  f"{', '.join(sorted(dataset.renewals))}"))
+
+
 def prepare_remittances(store: Store, reader, upto: date) -> int:
     """Screen and read every remittance received on or before `upto`
     that no day run has processed yet — a stored embedding is the
