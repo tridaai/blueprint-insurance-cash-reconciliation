@@ -125,7 +125,7 @@ def test_all_four_event_kinds_arrive_with_their_totals(monkeypatch):
     assert assembled["totals"]["allocations"] == "1000.00"
     assert approved["actor"] == CONTROLLER
     assert approved["totals"] == {"allocations": "1000.00", "write_offs": "0.00",
-                                  "payable_offsets": "0.00"}
+                                  "payable_offsets": "0.00", "non_premium": "0.00"}
     assert returned["id"] == "BL-W1" and returned["actor"] == CONTROLLER
     assert returned["totals"]["amount"] == "1000.00"
     assert returned["totals"]["reason"] == "NSF"

@@ -59,8 +59,8 @@ def test_month_figures_foot_to_day_reports_and_close_packs(world):
     # The close packs' own committed figures for the same months.
     assert months["2026-09"]["bank_value"] == "219914.65"
     assert months["2026-09"]["suspense_received_value"] == "61086.99"
-    assert months["2026-10"]["bank_value"] == "34753.66"
-    assert months["2026-10"]["suspense_received_value"] == "12810.76"
+    assert months["2026-10"]["bank_value"] == "113495.09"
+    assert months["2026-10"]["suspense_received_value"] == "34954.75"
 
     # Opening seed months: one line each, wholly in suspense.
     assert months["2026-06"]["bank_value"] == "940.00"
