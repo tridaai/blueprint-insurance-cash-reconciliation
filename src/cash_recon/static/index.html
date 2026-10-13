@@ -252,6 +252,7 @@ async function loadReport() {
   $("returnsreport").innerHTML = rets.count
     ? table([{key: "return_id", label: "Return"}, {key: "bank_line_id", label: "Bank line"},
              {key: "reason", label: "Reason"}, {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+             {label: "Part?", render: r => r.partial ? "part-return — the rest stands" : "—"},
              {key: "recorded_by", label: "Recorded by"},
              {label: "Reversing packs", render: r => r.pack_ids.join(", ") || "—"}], rets.items)
       + `<p class="note">${rets.count} return(s) recorded this day, ${money(rets.total)} taken back by the bank — reversing entries; the original applications stand in their packs, flagged RETURN_AFFECTED.</p>`

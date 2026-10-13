@@ -320,7 +320,8 @@ def golden_rows() -> list[dict]:
         "case": "RETURN-NSF-RESEND", "kind": "returns",
         "expect": {
             "reopened_balance": "1000.00", "installment_status": "open",
-            "partial_refused": True, "report_returns_count": 1,
+            "over_return_refused": True, "partial_return_flag": True,
+            "applied_after_partial": "600.00", "report_returns_count": 2,
             "report_returns_total": "1000.00", "pack_flagged": True,
             "posting_file_unchanged": True, "resent_tier": "T1_EXACT",
             "resent_duplicate": False, "resent_link": "BL-R1",
@@ -760,18 +761,28 @@ def returns_scenarios() -> dict[str, dict]:
     run_approve(store, date(2026, 9, 3))
     pack = store.pack("PACK-2026-09-03")
     posting_before = gate.posting_file(pack)
-    partial_refused = False
+    # Round 11: part of a line coming back is recorded, not
+    # refused — an over-return is what is refused now. The line
+    # comes back in two governed steps on the same day: 400.00
+    # (a part-return; 600.00 stands applied), then the rest.
+    over_refused = False
     try:
-        record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5), amount=D("400.00"))
+        record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5), amount=D("1400.00"))
     except ReturnError:
-        partial_refused = True
+        over_refused = True
+    partial = record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5),
+                            amount=D("400.00"))
+    applied_after_partial = str(
+        store.receivable("NSP-3001").installments[0].amount_applied)
     record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5))
     rec = store.receivable("NSP-3001")
     report = day_report(store, date(2026, 9, 5), policy)
     nsf = {
         "reopened_balance": str(rec.open_balance),
         "installment_status": rec.installments[0].status.value,
-        "partial_refused": partial_refused,
+        "over_return_refused": over_refused,
+        "partial_return_flag": partial.partial,
+        "applied_after_partial": applied_after_partial,
         "report_returns_count": report["returns_recorded"]["count"],
         "report_returns_total": report["returns_recorded"]["total"],
         "pack_flagged": store.pack("PACK-2026-09-03").flags == ["RETURN_AFFECTED"],

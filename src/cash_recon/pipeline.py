@@ -49,6 +49,7 @@ from .models import AuditEvent, DayClaim, ExceptionCode, ExceptionRecord, Suspen
 from .money import ZERO
 from .objects import ObjectStore
 from .report import day_report
+from .returns import fully_returned_line_ids
 from .store import Store
 
 log = logging.getLogger("cash_recon.pipeline")
@@ -259,7 +260,7 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
             remittances=store.remittances(on=day),
             prior_lines=prior,
             settled_line_ids=set(settled),
-            returned_line_ids={r.bank_line_id for r in store.returns()},
+            returned_line_ids=fully_returned_line_ids(store),
             payables={p.policy_number: p for p in store.payables(status="open")},
             proposer=reader,
             policy=policy,

@@ -84,7 +84,8 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         (i for i in store.suspense_items() if i.bank_line_id == bank_line_id),
         key=lambda i: i.suspense_id,
     )
-    ret = store.return_for_line(bank_line_id)
+    rets = store.returns_for_line(bank_line_id)
+    ret = rets[0] if rets else None
 
     # -- provenance ---------------------------------------------------
     source: dict = {"kind": line.source, "import_batch": line.import_batch}
@@ -282,18 +283,47 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
     )
     original_return = None
     if line.resend_of:
-        original = store.return_for_line(line.resend_of)
-        original_return = original.return_id if original else None
+        originals = store.returns_for_line(line.resend_of)
+        original_return = originals[-1].return_id if originals else None
 
     # -- final state ----------------------------------------------------
-    returned_amount = ret.amount if ret else ZERO
-    reversed_amount = posted if ret else ZERO
-    if ret is not None:
+    # The reversed figure comes from the returns' own unwind
+    # records — the cash each return actually took back out of the
+    # application. A return recorded before unwind records existed
+    # is a full return by construction, so its reversal is the
+    # whole posted figure, exactly as this export has always read.
+    returned_amount = sum((r.amount for r in rets), ZERO)
+    if rets and any(r.unwind for r in rets):
+        reversed_amount = sum((u.cash for r in rets for u in r.unwind), ZERO)
+    elif rets:
+        reversed_amount = posted
+    else:
+        reversed_amount = ZERO
+    if rets and returned_amount >= line.amount:
         state = "returned"
+        if len(rets) == 1:
+            state_detail = (
+                f"The bank took the full line back ({ret.reason.value}, recorded "
+                f"{ret.return_date} by {ret.recorded_by}); its application stands "
+                "reversed and its suspense released."
+            )
+        else:
+            last = rets[-1]
+            state_detail = (
+                f"The bank took the full line back across {len(rets)} returns "
+                f"(the last: {last.reason.value}, recorded {last.return_date} by "
+                f"{last.recorded_by}); its application stands reversed and its "
+                "suspense released."
+            )
+    elif rets:
+        last = rets[-1]
+        state = "partly returned"
         state_detail = (
-            f"The bank took the full line back ({ret.reason.value}, recorded "
-            f"{ret.return_date} by {ret.recorded_by}); its application stands "
-            "reversed and its suspense released."
+            f"The bank took {as_str(returned_amount)} of the line back across "
+            f"{len(rets)} return(s) (the latest: {last.reason.value}, recorded "
+            f"{last.return_date} by {last.recorded_by}); the remaining "
+            f"{as_str(line.amount - returned_amount)} still stands — applied, "
+            "at the gate, or in suspense, exactly as the footing below shows."
         )
     elif non_premium_disposition is not None:
         state = "classified non-premium"
@@ -340,14 +370,14 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
     foots = accounted == line.amount
     terms = [
         f"allocations posted {as_str(posted)}",
-        f"reversed by return {as_str(reversed_amount)}" if ret else None,
+        f"reversed by return {as_str(reversed_amount)}" if rets else None,
         f"allocations at the gate {as_str(pending)}" if pending > ZERO else None,
         f"payable offsets posted {as_str(offsets_posted)}" if offsets_posted > ZERO else None,
         f"payable offsets at the gate {as_str(offsets_pending)}" if offsets_pending > ZERO else None,
         f"non-premium disposition posted {as_str(np_posted)}" if np_posted > ZERO else None,
         f"non-premium disposition at the gate {as_str(np_pending)}" if np_pending > ZERO else None,
         f"suspense open {as_str(suspense_open)}" if suspense_open > ZERO else None,
-        f"returned to the payer {as_str(returned_amount)}" if ret else None,
+        f"returned to the payer {as_str(returned_amount)}" if rets else None,
     ]
     footing_note = (
         "The line FOOTS: " + " + ".join(t for t in terms if t)
@@ -387,7 +417,8 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         "suspense": [_json(i) for i in suspense],
         "rematch_attempts": rematch_attempts,
         "gate_history": gate_history,
-        "return": _json(ret) if ret else None,
+        "return": _json(rets[-1]) if rets else None,
+        **({"returns": [_json(r) for r in rets]} if len(rets) > 1 else {}),
         "resend": {
             "resend_of": line.resend_of,
             "resend_of_return_id": original_return,
@@ -527,11 +558,14 @@ def render_line_export_text(export: dict) -> str:
                 f"      rejected by {g['rejection']['by']} at "
                 f"{g['rejection']['at']}: {g['rejection']['reason']}")
     if body["return"]:
-        r = body["return"]
-        out += ["", "RETURN",
+        shown = body.get("returns") or [body["return"]]
+        out += ["", "RETURN" if len(shown) == 1 else f"RETURNS ({len(shown)})"]
+        for r in shown:
+            out.append(
                 f"  {r['return_id']} · {r['reason']} · {r['amount']} · returned "
-                f"{r['return_date']} · recorded by {r['recorded_by']}",
-                f"  {r['detail']}"]
+                f"{r['return_date']} · recorded by {r['recorded_by']}"
+                + (" · PART-RETURN" if r.get("partial") else ""))
+            out.append(f"  {r['detail']}")
     resend = body["resend"]
     if resend["resend_of"] or resend["resent_as"]:
         out += ["", "RE-SEND LINKS"]

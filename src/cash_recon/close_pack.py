@@ -93,38 +93,79 @@ class _Position:
     """One suspense item, reconstructed: what entered suspense when
     its bank line was worked, and what re-match packs have released
     since, by the packs' value dates. A bank return of the item's
-    line releases the whole remaining position on the return date —
-    the cash went back to the payer, so it is in suspense no longer,
-    and the roll names that as its own term (returned_from_suspense)
-    rather than folding it into applications."""
+    line releases its suspense share on the return date — the whole
+    remaining position for a full return, exactly the recorded
+    share for a part-return (suspense unwinds first, so the share
+    is the part of the position the return took) — the cash went
+    back to the payer, so it is in suspense no longer, and the roll
+    names that as its own term (returned_from_suspense) rather than
+    folding it into applications. A return recorded before
+    part-returns existed carries no stored share: it reads as the
+    whole remaining position on its date, exactly as the position
+    was read before shares were recorded."""
 
     def __init__(self, item, created: Decimal | None, releases: list[tuple[date, Decimal]],
-                 returned_on: date | None = None):
+                 return_events: list[tuple[date, Decimal | None]] | None = None):
         self.item = item
         self.created = created  # None when the bank line is not on the books
         self.releases = sorted(releases)
-        self.returned_on = returned_on
+        # (return date, suspense share) in date order; a None share
+        # is a legacy full return: the whole remaining position.
+        self.return_events = sorted(return_events or [])
+
+    @property
+    def returned_on(self) -> date | None:
+        """The line's first return date, if any."""
+        return self.return_events[0][0] if self.return_events else None
+
+    def _return_release_at(self, upto: date) -> Decimal:
+        """What the line's returns dated on or before `upto` took
+        out of this position, walking the returns in order: an
+        explicit share subtracts itself; a legacy return takes
+        whatever of the position still stood on its date."""
+        taken = ZERO
+        for d, share in self.return_events:
+            if d > upto:
+                break
+            if share is None:
+                released = sum((amt for rd, amt in self.releases if rd <= d), ZERO)
+                taken = self.created - released if self.created is not None else taken
+            else:
+                taken += share
+        return taken
 
     def open_at(self, as_of: date) -> Decimal:
         if self.created is None:
             return self.item.amount
-        if self.returned_on is not None and as_of >= self.returned_on:
-            return ZERO
+        for d, share in self.return_events:
+            if share is None and d <= as_of:
+                # A legacy full return: the position closed on its
+                # date, exactly as it read before shares existed.
+                return ZERO
         released = sum((amt for d, amt in self.releases if d <= as_of), ZERO)
-        return self.created - released
+        return self.created - released - self._return_release_at(as_of)
 
     def released_by_return(self) -> Decimal:
-        """The amount the return itself released: what was still open
-        on the return date. Zero when the line was never returned."""
-        if self.returned_on is None or self.created is None:
+        """The amount the line's returns released in total: what was
+        still open on each return date, taken in order. Zero when
+        the line was never returned."""
+        if not self.return_events or self.created is None:
             return ZERO
-        released = sum((amt for d, amt in self.releases if d <= self.returned_on), ZERO)
-        return self.created - released
+        return self._return_release_at(self.return_events[-1][0])
+
+    def returned_between(self, first: date, last: date) -> Decimal:
+        """The suspense this position's returns released with return
+        dates inside [first, last] — the roll's returned term for a
+        period, per position."""
+        before = self._return_release_at(first - timedelta(days=1))
+        return self._return_release_at(last) - before
 
 
 def _positions(store: Store) -> tuple[list[_Position], dict[str, Decimal]]:
     lines = {l.bank_line_id: l for l in store.bank_lines()}
-    returned_on = {r.bank_line_id: r.return_date for r in store.returns()}
+    return_events: dict[str, list[tuple[date, Decimal | None]]] = defaultdict(list)
+    for r in store.returns():
+        return_events[r.bank_line_id].append((r.return_date, r.suspense_released))
     day_alloc: dict[str, Decimal] = defaultdict(lambda: ZERO)
     releases: dict[str, list[tuple[date, Decimal]]] = defaultdict(list)
     for pack in store.packs():
@@ -152,7 +193,7 @@ def _positions(store: Store) -> tuple[list[_Position], dict[str, Decimal]]:
         line = lines.get(item.bank_line_id)
         created = None if line is None else line.amount - day_alloc.get(item.bank_line_id, ZERO)
         positions.append(_Position(item, created, releases.get(item.bank_line_id, []),
-                                   returned_on.get(item.bank_line_id)))
+                                   return_events.get(item.bank_line_id)))
     return positions, lines
 
 
@@ -330,8 +371,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             ZERO,
         )
         r_returned = sum(
-            (pos.released_by_return() for pos in subset
-             if pos.returned_on is not None and in_month(pos.returned_on)),
+            (pos.returned_between(first, last) for pos in subset),
             ZERO,
         )
         r_closing = sum(
@@ -516,6 +556,9 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
                     ccy: as_str(total)
                     for ccy, total in sorted(returns_by_currency.items())
                 },
+                "partial_count": len([r for r in month_returns if r.partial]),
+                "partial_total": as_str(
+                    sum((r.amount for r in month_returns if r.partial), ZERO)),
             },
             "by_currency": {
                 ccy: {
@@ -548,6 +591,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
                 "return_date": r.return_date.isoformat(),
                 "amount": as_str(r.amount),
                 "currency": r.currency,
+                "partial": r.partial,
                 "recorded_by": r.recorded_by,
                 "pack_ids": list(r.pack_ids),
                 "detail": r.detail,
@@ -645,7 +689,9 @@ def render_close_pack_text(export: dict) -> str:
         f"  Received into suspense:      {roll['received_into_suspense']:>12}",
         f"  Applied from suspense:       {roll['applied_from_suspense']:>12}",
         f"  Returned from suspense:      {roll['returned_from_suspense']:>12}  (cash the bank took back; it leaves suspense by return, not by application)",
-        f"  Payment returns in month:    {roll['returns_in_month']['count']:>12}  totalling {roll['returns_in_month']['total']} (full bank lines, reversing entries below)",
+        f"  Payment returns in month:    {roll['returns_in_month']['count']:>12}  totalling {roll['returns_in_month']['total']} (reversing entries below"
+        + (f"; {roll['returns_in_month']['partial_count']} of them part-returns totalling {roll['returns_in_month']['partial_total']}"
+           if roll['returns_in_month'].get('partial_count') else "") + ")",
         f"  Applied via approved packs:  {roll['applied_allocations_approved']:>12}",
         f"  Approved write-offs:         {roll['approved_write_offs']:>12}  (receivable deltas; they do not release suspense cash)",
         f"  Closing suspense:            {roll['closing_suspense']:>12}",
@@ -728,6 +774,7 @@ def render_close_pack_text(export: dict) -> str:
                 f"  {r['return_id']} · {r['bank_line_id']} · {r['reason']} · "
                 f"{r['amount']:>10} · returned {r['return_date']} · recorded by "
                 f"{r['recorded_by']} · reversing packs: {', '.join(r['pack_ids']) or '—'}"
+                + (" · PART-RETURN: the rest of the line stands" if r.get("partial") else "")
             )
     out += ["", f"EXCEPTIONS OPENED IN THE MONTH ({len(body['exceptions_opened_in_month'])})"]
     for e in body["exceptions_opened_in_month"]:

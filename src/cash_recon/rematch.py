@@ -33,6 +33,7 @@ from .matcher import MatchContext, match_line
 from .models import AuditEvent, ExceptionCode
 from .money import ZERO
 from .pipeline import _expected_net, prepare_remittances
+from .returns import fully_returned_line_ids
 from .store import Store
 
 log = logging.getLogger("cash_recon.rematch")
@@ -101,7 +102,7 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         remittances=sorted(store.remittances(), key=lambda r: (r.received_date, r.remittance_id), reverse=True),
         prior_lines=sorted(store.bank_lines(), key=lambda l: (l.value_date, l.bank_line_id)),
         settled_line_ids=set(approved) | set(allocated),
-        returned_line_ids={r.bank_line_id for r in store.returns()},
+        returned_line_ids=fully_returned_line_ids(store),
         payables={p.policy_number: p for p in store.payables(status="open")},
         proposer=reader,
         policy=policy,

@@ -164,19 +164,25 @@ def suspense_aging(store: Store, as_of: date) -> list[dict]:
 
 def returns_view(store: Store, on: date | None = None) -> dict:
     """Payment returns as a control line: the count and total of the
-    full-line amounts the bank took back. With `on`, only the returns
-    recorded that day — the reversing entries belonging to that day's
-    report. Without it, every return on the books."""
+    amounts the bank took back, with part-returns carried distinctly
+    (their own count and total) — a return of part of a line is a
+    different control fact from a line coming back whole. With
+    `on`, only the returns recorded that day — the reversing
+    entries belonging to that day's report. Without it, every
+    return on the books."""
     rets = store.returns(on=on)
     totals_by_currency: dict[str, Decimal] = {}
     for r in rets:
         totals_by_currency[r.currency] = totals_by_currency.get(r.currency, ZERO) + r.amount
+    partials = [r for r in rets if r.partial]
     return {
         "count": len(rets),
         "total": str(sum((r.amount for r in rets), ZERO)),
         "totals_by_currency": {
             ccy: str(total) for ccy, total in sorted(totals_by_currency.items())
         },
+        "partial_count": len(partials),
+        "partial_total": str(sum((r.amount for r in partials), ZERO)),
         "items": [
             {
                 "return_id": r.return_id,
@@ -184,6 +190,7 @@ def returns_view(store: Store, on: date | None = None) -> dict:
                 "reason": r.reason.value,
                 "amount": str(r.amount),
                 "currency": r.currency,
+                "partial": r.partial,
                 "return_date": r.return_date.isoformat(),
                 "recorded_by": r.recorded_by,
                 "pack_ids": list(r.pack_ids),

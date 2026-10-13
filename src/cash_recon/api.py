@@ -99,7 +99,7 @@ class ReturnRequest(BaseModel):
     reason: str  # NSF | ACCOUNT_CLOSED | STOP_PAYMENT | RECALL
     actor: str
     on: date | None = None
-    amount: str | None = None  # anything but the full line amount is refused, in words
+    amount: str | None = None  # part of the line is a part-return; more than still stands is refused, in words
 
 
 class CancelRequest(BaseModel):

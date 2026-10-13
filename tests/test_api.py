@@ -75,18 +75,29 @@ def test_return_endpoints_and_line_history_over_http(client):
     client.post("/api/days/2026-09-02/run", json={"actor": "cash-team"})
     client.post("/api/packs/PACK-2026-09-02/approve", json={"approver": "Priya Nair"})
 
+    # A part-return is recorded (round 11); an over-return — more
+    # than the line brought in — is the refusal now, in words.
+    part = client.post("/api/bank-lines/BL-001/returns",
+                       json={"reason": "NSF", "actor": "Priya Nair", "on": "2026-09-04",
+                             "amount": "10.00"})
+    assert part.status_code == 200 and part.json()["return_id"] == "RET-BL-001"
+    assert part.json()["partial"] is True
+
     refused = client.post("/api/bank-lines/BL-001/returns",
                           json={"reason": "NSF", "actor": "Priya Nair", "on": "2026-09-04",
-                                "amount": "10.00"})
-    assert refused.status_code == 409 and "partial returns" in refused.json()["detail"]
+                                "amount": "99999.00"})
+    assert refused.status_code == 409 and "can never exceed" in refused.json()["detail"]
 
     ok = client.post("/api/bank-lines/BL-001/returns",
                      json={"reason": "NSF", "actor": "Priya Nair", "on": "2026-09-04"})
-    assert ok.status_code == 200 and ok.json()["return_id"] == "RET-BL-001"
+    assert ok.status_code == 200 and ok.json()["return_id"] == "RET-BL-001-2"
     rep = client.get("/api/days/2026-09-04/report").json()
-    assert rep["returns_recorded"]["count"] == 1
+    assert rep["returns_recorded"]["count"] == 2
+    assert rep["returns_recorded"]["total"] == "4800.00"
+    assert rep["returns_recorded"]["partial_count"] == 1
     history = client.get("/api/bank-lines/BL-001/history").json()
     assert history["return"]["reason"] == "NSF"
+    assert [r["return_id"] for r in history["returns"]] == ["RET-BL-001", "RET-BL-001-2"]
     assert history["packs"][0]["flags"] == ["RETURN_AFFECTED"]
     assert client.get("/api/bank-lines/BL-NOPE/history").status_code == 404
 

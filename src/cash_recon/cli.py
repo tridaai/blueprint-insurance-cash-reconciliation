@@ -64,7 +64,9 @@ def main() -> None:
     ret.add_argument("--actor", required=True, help="who records the return (a named person)")
     ret.add_argument("--on", default=None, help="return date YYYY-MM-DD (default today)")
     ret.add_argument("--amount", default=None,
-                     help="amount the bank returned; anything but the full line amount is refused")
+                     help="amount the bank returned (default: the line's whole standing "
+                          "balance); part of the line is recorded as a part-return, and "
+                          "more than still stands is refused")
     hist = sub.add_parser("history", help="one bank line's whole chain: application, return, re-application")
     hist.add_argument("bank_line_id")
     aud = sub.add_parser("audit-export", help="the per-line audit export: every cent and every act, digested")

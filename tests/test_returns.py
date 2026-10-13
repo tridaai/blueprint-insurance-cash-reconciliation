@@ -125,14 +125,23 @@ def test_return_refusals_state_their_reasons():
     with pytest.raises(ReturnError, match="unknown return reason"):
         record_return(store, "BL-R1", "BOUNCED", CONTROLLER, date(2026, 9, 4))
 
-    # Part of a line coming back is refused, in words, and changes nothing.
-    with pytest.raises(ReturnError, match="partial returns are not recorded"):
-        record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 4), amount=D("400.00"))
+    # More than the line brought in is refused, in words, and changes nothing.
+    with pytest.raises(ReturnError, match="can never exceed"):
+        record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 4), amount=D("1400.00"))
     assert store.receivable("NSP-3001").open_balance == D("0.00")
 
-    record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 4))
-    with pytest.raises(ReturnError, match="already been returned"):
-        record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5))
+    # Part of a line coming back is recorded (round 11): it unwinds
+    # that part of the application and the rest stands.
+    ret = record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 4), amount=D("400.00"))
+    assert ret.partial is True and ret.amount == D("400.00")
+    assert store.receivable("NSP-3001").open_balance == D("400.00")
+
+    # The remainder can still come back. After that the line is
+    # fully returned, and a further return is refused in words.
+    record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 5))
+    assert store.receivable("NSP-3001").open_balance == D("1000.00")
+    with pytest.raises(ReturnError, match="already been returned in full"):
+        record_return(store, "BL-R1", "NSF", CONTROLLER, date(2026, 9, 6))
 
 
 def test_resent_payment_after_return_applies_and_links_back():
@@ -179,8 +188,10 @@ def test_return_releases_suspense_and_the_close_pack_foots():
     assert roll["returned_from_suspense"] == "200.00"
     assert roll["closing_suspense"] == "0.00"
     assert roll["returns_in_month"] == {
-        "count": 1, "total": "1200.00", "totals_by_currency": {"USD": "1200.00"}}
+        "count": 1, "total": "1200.00", "totals_by_currency": {"USD": "1200.00"},
+        "partial_count": 0, "partial_total": "0.00"}
     assert export["pack"]["payment_returns_in_month"][0]["reason"] == "RECALL"
+    assert export["pack"]["payment_returns_in_month"][0]["partial"] is False
     text = render_close_pack_text(export)
     assert "Returned from suspense" in text and "RET-BL-R3" in text
 
