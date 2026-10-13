@@ -444,12 +444,29 @@ term. Suspense the line held is released by the return — the money
 went back to the payer. A returned line cannot be re-applied
 as-is; if the payer re-sends, the money arrives as a **new** bank
 line, is matched on its own merits (the duplicate check treats a
-returned line's fingerprint as reusable), and is linked back to
-the returned original on its record. The whole chain — application,
+fully returned line's fingerprint as reusable), and is linked back
+to the returned original on its record. The whole chain — application,
 return, re-application — reads off the line's history
 (`GET /api/bank-lines/{id}/history`, `cash-recon history`).
-Full-line returns only: a bank returning part of a line is refused
-at recording time, with the reason stated.
+
+**Part-returns are recorded too.** A bank claws back what it claws
+back, and it is not always the whole line. A return may be for part
+of the line: the returned amount unwinds the line's cash in one
+pinned order — suspense the line still holds first (cash that never
+settled anything), then its allocations in the reverse of the order
+they were applied, each unwound by its replayed gross delta, in
+full when the return takes all of its remaining cash and pro-rata
+to the cent when it takes part, so successive part-returns
+converge exactly and the rest of the application simply stands.
+The day's state is named honestly — a line with part of its cash
+back is **partly returned** in the per-line audit export — and the
+day report and close pack carry part-returns as their own figures
+(count and total beside the returns totals). A line can be
+returned more than once, until its returns sum to the line amount;
+a return that would take the sum past it is refused at recording
+time, in words, and changes nothing. A part-return never disturbs
+cash netted against a return-premium payable — returning the whole
+standing balance always can, exactly as a full return always could.
 
 ## Return premiums
 
@@ -557,7 +574,9 @@ every exception opened in the month and every one closed by month
 end with its disposition, suspense aging at month end, and the
 broker scorecard scoped to the month. The month's payment returns
 stand in the pack as reversing entries — count and total as a
-control line, each return listed, the packs it reversed named and
+control line, part-returns with their own count and total beside
+it, each return listed and marked when it is a part-return, the
+packs it reversed named and
 flagged — and cash a return pulled out of suspense is its own term
 in the roll, so the month foots with the returns inside it, not
 around it. The pack also carries the month's proposal quality:
@@ -685,6 +704,32 @@ whatever the workbench has done with them. So:
   because applying was never the run's to do, and tests prove the
   recovered world's books are the clean single-run world's books,
   exactly.
+- The trail guard on its own was read-then-write, and this README
+  said so when the guard shipped: two processes starting the same
+  day at the same moment could both read the same trail and both
+  pass it. That gap is now closed at the store, and the claim is
+  made true plainly: before any of the run's own writes, the
+  starter takes the day's **claim** (the `day_claims` record,
+  migration `0006` in both dialects) — the first starter's insert
+  wins atomically, and a second starter, even mid-run of the
+  first, meets the standing claim and is refused the same governed
+  way (API 409 / CLI exit 1), naming the claiming attempt. The
+  claim is paired with a per-day run lock held for the run's
+  duration (a Postgres advisory lock on a dedicated connection,
+  an flock on a file beside the SQLite database, a threading lock
+  in the in-memory store), because the lock is what lets the
+  sanctioned recovery prove the prior attempt is finished: the
+  recovery reads the orphan verdict off the trail as before, then
+  must win the lock — a live attempt would still be holding it —
+  and takes the claim over by compare-and-swap on the interrupted
+  attempt's number, and on no other terms. A completed run's
+  claim stands as the day's record; a decided pack's day is
+  claimed permanently; a starter that claimed the day and died
+  before its start reached the trail is recovered from the
+  claim's own evidence. The store conformance battery pins the
+  claim semantics on all three stores, including a genuine
+  two-writer race against Postgres: two connections racing for
+  one day, exactly one winner, for the claim and for the lock.
 
 The run's LangGraph checkpoints are the third lifecycle concern:
 every run appends a chain of them, and the saver's tables grow
@@ -737,7 +782,9 @@ wire; an advice that still does not foot leaves the cash open under
 the correct code), the installment cases (a named installment
 settles the named one; a note indicating a later installment applies
 oldest-first under INTENT_DIFFERS), the return cases (an NSF return
-re-opens its policy, a part-return is refused, the pack is flagged
+re-opens its policy; the line comes back in two governed steps —
+a part-return that leaves the rest standing, then the remainder —
+while an over-return is refused, the pack is flagged
 with its posting file untouched, and the re-send applies cleanly
 linked to the original; an overpaid line's return releases its
 suspense and the close still foots), a workbench case (assignment,
@@ -827,7 +874,7 @@ src/cash_recon/
   llm.py         the model port: reader, proposer, note drafter
   documents.py   the document screen + near-duplicate detection
   gate.py        packs, approvals, entry edits, write-offs, the posting file
-  returns.py     returned payments: exact reversal, pack flags, the line's history
+  returns.py     returned payments: exact reversal (whole lines and part-returns), pack flags, the line's history
   cancellations.py  mid-term cancellations: pro-rata return premiums, the payable they open
   payouts.py     payout packs: payables settled at the gate, the payout file
   today.py       the day-open checklist over the same read models
@@ -852,7 +899,7 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 211 tests,
+The blueprint is built and passing its automated gates: 220 tests,
 68/68 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with

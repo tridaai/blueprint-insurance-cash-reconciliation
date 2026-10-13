@@ -214,18 +214,48 @@ gross-up, with its capped settle-in-full branch, is where a naive
 stand byte for byte and gain a RETURN_AFFECTED flag; the return is
 its own record and appears as a reversing entry on its day's
 report and in the close pack, whose suspense reconstruction gives
-returned cash its own roll term — an item's position goes to zero
-on the return date, and `returned_from_suspense` is what the roll
-subtracts, so the month foots with returns inside the identity.
+returned cash its own roll term — an item's position falls by the
+return's recorded suspense share on the return date (the whole
+remaining position, for a full return), and
+`returned_from_suspense` is what the roll subtracts, so the month
+foots with returns inside the identity.
 The duplicate check had to learn the same lesson: a returned line
 leaves `settled_line_ids` semantics unchanged (its allocations are
 still on record), so the matcher takes an explicit
 `returned_line_ids` set and skips those priors — the re-send is a
 new bank line, fingerprinted like any other, and the link back to
 the returned original is written onto its record at persist time.
-Part-returns are refused rather than modelled: a fractional notion
-of "applied" would infect every control in the system, and the
-refusal states the scope in words.
+
+Part-returns are modelled, on the same exactness discipline —
+they were refused in earlier rounds, on the argument that a
+fractional notion of "applied" would infect every control in the
+system. The unwind record is what answers that argument: a
+part-return never leaves a fraction behind, because it records,
+per allocation, the cash it took and the gross it re-opened, so
+what still stands afterwards is a sum over records, not a state
+someone estimated. The returned amount unwinds in one pinned
+order — the line's open suspense first (cash that settled
+nothing), then allocations in the reverse of application order —
+each allocation re-opening by its replayed delta: whole when the
+return takes all of its remaining cash, pro-rata to the cent
+(half-up, at the recorded rates and conversions — never
+re-priced) when it takes part, with the residual absorbed by
+whichever return completes the allocation, so successive
+part-returns sum to the replayed delta exactly. A line may be
+returned repeatedly until its returns reach the line amount; a
+return past it is refused in words, as is a part-return that
+would have to disturb cash netted against a return-premium
+payable (the whole standing balance remains returnable, as a
+full return always was). Only a FULLY returned line joins
+`returned_line_ids`: a partly returned line still stands partly
+applied, so its fingerprint is not reusable — a same-amount
+arrival against it is a duplicate, not a re-send. The reports
+carry part-returns as distinct figures (count and total beside
+the returns totals, per currency as with everything since the
+currency round), and the per-line audit export names the state
+"partly returned" and foots it: posted − reversed + at-gate +
+offsets + suspense open + returned = the bank amount, with
+"reversed" read from the returns' own unwind records.
 
 **The workbench handles; it does not dispose.** The exception
 queue is worked daily, and the failure mode to avoid is a second,
@@ -386,7 +416,9 @@ webhook state (configured or disabled) so an operator can tell
   the queries the desk runs. Numbered SQL migrations in `migrations/`
   are applied by the store at startup; `0002` adds the pgvector
   embedding table, `0003` the payment-returns table, `0004` the
-  return-premium tables (cancellations, payables, payout packs).
+  return-premium tables (cancellations, payables, payout packs),
+  `0005` the currency columns and the FX story, and `0006` the
+  day-claims table the run lifecycle stands on.
   The embedding table's `vector(384)` is a contract every store
   enforces in code at `set_embedding` — `EmbeddingDimensionError`,
   naming the expected dimension — so the JSON-backed stores refuse
@@ -492,6 +524,42 @@ and the conformance battery now pins both: suspense `add` is
 insert-only everywhere, and the allocations index is keyed by
 (bank line, installment) everywhere — a second save indexes
 nothing twice.
+
+The trail guard, though, is read-then-write, and when it shipped
+this document's position was that cross-process simultaneity was
+the one thing it could not make true: two processes starting the
+same day at the same moment could both read the same trail and
+both pass. That is now made true, at the store. Before any of
+the run's own writes, the starter takes the day's claim — the
+`day_claims` record (migration `0006` in both dialects, and the
+in-memory store's equivalent), keyed by the day itself. The
+first starter's insert wins atomically (a unique key, an
+insert-or-fail); a second starter, even mid-run of the first,
+meets the standing claim and is refused through the same
+governed path as any repeat — API 409 / CLI exit 1, the refusal
+audited — naming the claiming attempt. The claim alone cannot
+distinguish a live attempt from a dead one, so it is paired with
+a per-day run lock held for the run's duration: a Postgres
+advisory lock on a dedicated connection (session-scoped, so it
+frees itself when the holder's process dies), an flock on a file
+beside the SQLite database, a threading lock in memory. The
+recovery path is the claim's only takeover route, and it is
+gated twice: the trail must show the prior attempt orphaned (or
+the claim itself must stand ahead of the trail — a starter that
+died between claiming and its start being recorded), and the
+recovery must win the lock, which a live attempt would still be
+holding; only then does it take the claim over, by
+compare-and-swap on the interrupted attempt's number and state.
+A completed run's claim is the day's standing record, and a
+decided pack's day is claimed permanently, because the decided
+refusal precedes claim acquisition and a completed claim never
+returns to running. The conformance battery pins the claim
+semantics on all three stores — first claim wins, reclaim is
+compare-and-swap, a completed claim is neither reclaimable nor
+re-claimable, the lock has one holder — and, against Postgres,
+runs a genuine two-writer race: two store instances on two
+connections, released at the same moment, exactly one winner
+for the claim and exactly one for the lock.
 
 ## Checkpoint retention
 
@@ -602,7 +670,7 @@ claims or reinsurance cash — premium cash application for one
 carrier. Auto-application exists only as a *mark* on small exact
 matches; a deployment that wants true straight-through posting for
 that slice approves those packs in bulk, with the report still
-naming every line. Part-returns are not modelled (a bank returning
-part of a line is refused at recording, in words), and proposal
-provenance exists only on packs assembled since the quality report
-landed — older packs are ungraded, not backfilled.
+naming every line. Combination settlements are pairs only (three
+or more legs that together settle one item are not searched), and
+proposal provenance exists only on packs assembled since the
+quality report landed — older packs are ungraded, not backfilled.
