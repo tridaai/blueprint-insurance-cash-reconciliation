@@ -13,7 +13,7 @@ import os
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
@@ -32,6 +32,7 @@ from .rematch import rematch_suspense
 from .returns import ReturnError, line_history, record_return
 from .statement import StatementImportError, import_statement
 from .store import Store, dump, make_store
+from .today import today_view
 from .workbench import WorkbenchError, add_handling_note, assign_exception, workbench_view
 
 log = logging.getLogger("cash_recon.api")
@@ -170,6 +171,11 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def console():
         return (STATIC / "index.html").read_text()
+
+    @app.get("/api/today")
+    def today(on: date | None = Query(default=None, alias="date")):
+        s = get_service()
+        return today_view(s.store, on or date.today(), s.policy)
 
     @app.post("/api/seed")
     def seed():

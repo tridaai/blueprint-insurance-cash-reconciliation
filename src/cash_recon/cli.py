@@ -23,6 +23,7 @@ from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, rej
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
 from .report import broker_scorecard, day_report, proposal_quality, return_premiums_view
+from .today import today_view
 from .returns import ReturnError, line_history, record_return
 from .workbench import WorkbenchError, add_handling_note, assign_exception, workbench_view
 from .statement import StatementImportError, import_statement
@@ -33,6 +34,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="cash-recon")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("seed", help="load the synthetic Northgate dataset")
+    tod = sub.add_parser("today", help="the day-open checklist: the desk's morning, in order")
+    tod.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     run = sub.add_parser("run", help="run one day through the pipeline")
     run.add_argument("day", help="YYYY-MM-DD")
     run.add_argument("--actor", default="cash-team")
@@ -97,7 +100,10 @@ def main() -> None:
 
     store, objects = make_store(), make_object_store()
     policy = PolicyConfig.from_env()
-    if args.command == "seed":
+    if args.command == "today":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        print(json.dumps(today_view(store, as_of, policy), indent=2))
+    elif args.command == "seed":
         ds = build_dataset()
         ingest_dataset(store, objects, ds)
         print(f"seeded: {len(ds.receivables)} policies, {len(ds.bank_lines)} bank lines, "

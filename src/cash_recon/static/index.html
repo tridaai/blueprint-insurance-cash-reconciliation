@@ -53,7 +53,8 @@
 </div>
 
 <nav>
-  <button data-tab="report" class="active">Day report</button>
+  <button data-tab="today" class="active">Today</button>
+  <button data-tab="report">Day report</button>
   <button data-tab="import">Statement import</button>
   <button data-tab="close">Month close</button>
   <button data-tab="scorecard">Broker scorecard</button>
@@ -64,7 +65,11 @@
 </nav>
 
 <main>
-  <section id="tab-report">
+  <section id="tab-today">
+    <p class="note">The desk's morning, in order — each step reads the same books the tabs work from, and clicking a step takes you to the tab that does the work. Nothing here holds state of its own: a step is done exactly when the act underneath it has happened.</p>
+    <div id="today-steps"></div>
+  </section>
+  <section id="tab-report" class="hidden">
     <div class="cards" id="cards"></div>
     <p id="footing" class="note"></p>
     <h3>By broker</h3><div id="bybroker"></div>
@@ -173,6 +178,21 @@ function table(cols, rows) {
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 function setStatus(msg) { $("status").textContent = msg; }
+
+async function loadToday() {
+  const day = $("day").value;
+  const view = await api(`/api/today?date=${day}`);
+  $("today-steps").innerHTML = view.steps.map(s => {
+    const mark = s.state === "done" ? "✓ done" : (s.state === "info" ? "· noted" : "○ to do");
+    const color = s.state === "done" ? "var(--ok, #15803d)" : (s.state === "info" ? "#666" : "var(--accent)");
+    return `<div onclick="document.querySelector('nav button[data-tab=\\'${s.tab}\\']').click()"
+      style="display:flex; gap:14px; align-items:baseline; padding:12px 14px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; cursor:pointer; background:#fff">
+      <span style="min-width:76px; font-weight:600; color:${color}">${mark}</span>
+      <span style="min-width:210px; font-weight:600">${s.label}</span>
+      <span class="note" style="margin:0">${s.detail}</span>
+    </div>`;
+  }).join("") + `<p class="note">${view.ready ? "The morning's checks are clear." : view.pending + " step(s) still to do."}</p>`;
+}
 
 async function loadReport() {
   const day = $("day").value;
@@ -556,7 +576,7 @@ async function loadAudit() {
     [{key: "at", label: "At"}, {key: "actor", label: "Actor"}, {key: "action", label: "Action"},
      {key: "subject", label: "Subject"}, {key: "detail", label: "Detail"}], events.slice().reverse());
 }
-const loaders = {report: loadReport, import: () => Promise.resolve(), close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
+const loaders = {today: loadToday, report: loadReport, import: () => Promise.resolve(), close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
 $("wb-filter").addEventListener("click", () => loadExceptions().catch(e => setStatus(e.message)));
 $("return-go").addEventListener("click", recordReturn);
 $("cancel-go").addEventListener("click", recordCancellation);
@@ -575,7 +595,7 @@ document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("cli
   loaders[btn.dataset.tab]().catch(e => setStatus(e.message));
 }));
 $("seed").addEventListener("click", async () => {
-  try { const r = await api("/api/seed", {method: "POST"}); setStatus(`Seeded ${r.policies} policies, ${r.bank_lines} bank lines, ${r.remittances} remittances.`); loadReport(); }
+  try { const r = await api("/api/seed", {method: "POST"}); setStatus(`Seeded ${r.policies} policies, ${r.bank_lines} bank lines, ${r.remittances} remittances.`); loadToday(); loadReport(); }
   catch (e) { setStatus(e.message); }
 });
 $("rematch").addEventListener("click", runRematch);
@@ -584,10 +604,10 @@ $("run").addEventListener("click", async () => {
     const r = await api(`/api/days/${$("day").value}/run`, {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({actor: $("actor").value || "cash-team"})});
     setStatus(`Ran ${r.day}: ${r.pack_id ? "pack " + r.pack_id + " assembled for the gate" : "no pack (no bank lines)"}.`);
-    loadReport();
+    loadToday(); loadReport();
   } catch (e) { setStatus(e.message); }
 });
-loadReport().catch(() => setStatus("Seed the synthetic month to begin."));
+loadToday().catch(() => setStatus("Seed the synthetic month to begin."));
 </script>
 </body>
 </html>
