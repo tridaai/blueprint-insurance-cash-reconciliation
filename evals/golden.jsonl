@@ -29,6 +29,16 @@
 {"case": "REM-DUNMORE-01", "kind": "remittance", "lines": {"NSP-1005": "19425.00", "NSP-1099": "2500.00"}, "injection": false, "duplicate_of": null}
 {"case": "REM-ELKHORN-01", "kind": "remittance", "lines": {"NSP-1015": "4512.00", "NSP-1024": "5544.00"}, "injection": true, "duplicate_of": null}
 {"case": "REM-FERN-01", "kind": "remittance", "lines": {"NSP-1016": "6929.18", "NSP-1025": "19705.04", "NSP-1034": "10440.37"}, "injection": false, "duplicate_of": null}
+{"case": "BL-101", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1007": "3924.90"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-102", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1046": "6960.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-103", "kind": "bank_line", "tier": "T3_REFERENCE", "exceptions": ["OVERPAID"], "allocations": {"NSP-1047": "5568.00"}, "suspense": "128.00", "auto": false, "proposed": false}
+{"case": "BL-104", "kind": "bank_line", "tier": null, "exceptions": ["NETTING_MISMATCH"], "allocations": {}, "suspense": "4250.00", "auto": false, "proposed": false}
+{"case": "BL-105", "kind": "bank_line", "tier": "T2_NETTING", "exceptions": [], "allocations": {"NSP-1003": "2340.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "BL-106", "kind": "bank_line", "tier": null, "exceptions": ["UNIDENTIFIED"], "allocations": {}, "suspense": "8432.76", "auto": false, "proposed": false}
+{"case": "BL-107", "kind": "bank_line", "tier": "T1_EXACT", "exceptions": [], "allocations": {"NSP-1048": "3150.00"}, "suspense": "0.00", "auto": false, "proposed": false}
+{"case": "CLOSE-2026-10", "kind": "close_october", "expect": {"opening_suspense": "64366.99", "september_closing_suspense": "64366.99", "cash_received_in_month": "34753.66", "received_into_suspense": "12810.76", "closing_suspense": "77177.75", "footed": true, "payable_ledger_footed": true}}
+{"case": "RENEWAL-TERM", "kind": "renewal", "expect": {"installments": 8, "named_installment": "NSP-1003-I5", "named_status": "applied", "named_applied": "2600.00", "older_open_installment": "NSP-1003-I2", "older_open_balance": "2468.88"}}
+{"case": "RETURN-PREMIUMS", "kind": "cancellations", "expect": {"earned_to_the_cent": "2991.78", "return_to_insured": "3008.22", "payee_insured": "insured", "return_to_broker": "5966.85", "payee_broker": "Testline Brokers", "netted_on_day_report": "3000.00", "day_footing_ok": true, "payable_after_netting": "8.22", "self_approval_refused": true, "second_approver_required": true, "payout_file_carries_final_row": true, "dec_opening_payables": "5966.85", "dec_opened": "3008.22", "dec_netted": "3000.00", "dec_paid": "5975.07", "dec_closing_payables": "0.00", "dec_payable_ledger_footed": true}}
 {"case": "CONTROL-FOOTING", "kind": "control", "expect": "every day report foots"}
 {"case": "CONTROL-AGING", "kind": "control", "expect": "seed suspense ages into 31\u201360 and 60+ buckets"}
 {"case": "REMATCH-LATE-ADVICE", "kind": "rematch", "expect": {"recovered_bank_line": "BL-T1", "tier": "T4_REMITTANCE", "pack_id": "PACK-REMATCH-2026-09-08", "item_status": "resolved", "arithmetic_exception": "resolved", "partial_exception": "open", "recoveries_total": "4400.00"}}

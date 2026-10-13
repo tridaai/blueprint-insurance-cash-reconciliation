@@ -475,7 +475,7 @@ def build_october_dataset() -> OctoberDataset:
                  payer_name=fern, reference="NSP-1049", narrative=""),
     ]
     gold = {
-        "BL-107": GoldOutcome(tier="T1_EXACT", allocations={"NSP-1048": "3150.00"}, auto=True),
+        "BL-107": GoldOutcome(tier="T1_EXACT", allocations={"NSP-1048": "3150.00"}),
         "BL-105": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1003": "2340.00"}),
         "BL-101": GoldOutcome(tier="T2_NETTING", allocations={"NSP-1007": "3924.90"}),
         "BL-106": GoldOutcome(exceptions=["UNIDENTIFIED"], suspense="8432.76"),

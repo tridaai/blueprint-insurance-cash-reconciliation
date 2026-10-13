@@ -1,11 +1,14 @@
 """Golden-case eval gate for the Insurance Cash Reconciliation Agent.
 
-Runs Northgate's synthetic September through the real pipeline
-(offline reader, in-memory stores), approving each day's pack as a
-named controller the way the desk would, then scores every planted
-case against evals/golden.jsonl — gold by construction, committed to
-the repo so the gate grades the pipeline against a fixed record, not
-against the dataset builder's current mood.
+Runs Northgate's synthetic September AND October through the real
+pipeline (offline reader, in-memory stores), approving each day's
+pack as a named controller the way the desk would, then scores
+every planted case against evals/golden.jsonl — gold by
+construction, committed to the repo so the gate grades the pipeline
+against a fixed record, not against the dataset builder's current
+mood. September's close pack is snapshotted before October is
+ingested, so the continuity control (October's opening == September's
+closing) grades two independently assembled packs.
 
     python evals/run_evals.py            # score, print the verdict
     python evals/run_evals.py --write    # regenerate golden.jsonl
@@ -24,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cash_recon.config import Policy as PolicyConfig  # noqa: E402
-from cash_recon.dataset import build_dataset  # noqa: E402
+from cash_recon.dataset import build_dataset, build_october_dataset  # noqa: E402
 from cash_recon.gate import approve_pack  # noqa: E402
 from cash_recon.llm import OfflineReader  # noqa: E402
 from cash_recon.models import (  # noqa: E402
@@ -36,7 +39,7 @@ from cash_recon.models import (  # noqa: E402
     Remittance,
 )
 from cash_recon.objects import InMemoryObjectStore  # noqa: E402
-from cash_recon.pipeline import ingest_dataset, run_day  # noqa: E402
+from cash_recon.pipeline import ingest_dataset, ingest_october_dataset, run_day  # noqa: E402
 from cash_recon.rematch import rematch_suspense  # noqa: E402
 from cash_recon.report import broker_scorecard, day_report, suspense_aging  # noqa: E402
 from cash_recon.store import InMemoryStore  # noqa: E402
@@ -74,6 +77,65 @@ def golden_rows() -> list[dict]:
                 "duplicate_of": rg.get("duplicate_of"),
             }
         )
+    october = build_october_dataset()
+    for bid, gold in sorted(october.gold.items()):
+        rows.append(
+            {
+                "case": bid,
+                "kind": "bank_line",
+                "tier": gold.tier,
+                "exceptions": sorted(gold.exceptions),
+                "allocations": dict(sorted(gold.allocations.items())),
+                "suspense": gold.suspense,
+                "auto": gold.auto,
+                "proposed": gold.proposed,
+            }
+        )
+    rows.append({
+        "case": "CLOSE-2026-10", "kind": "close_october",
+        "expect": {
+            "opening_suspense": "64366.99",
+            "september_closing_suspense": "64366.99",
+            "cash_received_in_month": "34753.66",
+            "received_into_suspense": "12810.76",
+            "closing_suspense": "77177.75",
+            "footed": True,
+            "payable_ledger_footed": True,
+        },
+    })
+    rows.append({
+        "case": "RENEWAL-TERM", "kind": "renewal",
+        "expect": {
+            "installments": 8,
+            "named_installment": "NSP-1003-I5",
+            "named_status": "applied",
+            "named_applied": "2600.00",
+            "older_open_installment": "NSP-1003-I2",
+            "older_open_balance": "2468.88",
+        },
+    })
+    rows.append({
+        "case": "RETURN-PREMIUMS", "kind": "cancellations",
+        "expect": {
+            "earned_to_the_cent": "2991.78",
+            "return_to_insured": "3008.22",
+            "payee_insured": "insured",
+            "return_to_broker": "5966.85",
+            "payee_broker": "Testline Brokers",
+            "netted_on_day_report": "3000.00",
+            "day_footing_ok": True,
+            "payable_after_netting": "8.22",
+            "self_approval_refused": True,
+            "second_approver_required": True,
+            "payout_file_carries_final_row": True,
+            "dec_opening_payables": "5966.85",
+            "dec_opened": "3008.22",
+            "dec_netted": "3000.00",
+            "dec_paid": "5975.07",
+            "dec_closing_payables": "0.00",
+            "dec_payable_ledger_footed": True,
+        },
+    })
     rows.append({"case": "CONTROL-FOOTING", "kind": "control", "expect": "every day report foots"})
     rows.append({"case": "CONTROL-AGING", "kind": "control", "expect": "seed suspense ages into 31–60 and 60+ buckets"})
     rows.append({
@@ -165,6 +227,8 @@ def golden_rows() -> list[dict]:
 
 
 def run_pipeline():
+    from cash_recon.close_pack import close_pack_export
+
     ds = build_dataset()
     store, objects = InMemoryStore(), InMemoryObjectStore()
     ingest_dataset(store, objects, ds)
@@ -182,7 +246,22 @@ def run_pipeline():
         reports[day.isoformat()] = result["report"]
         if result["pack_id"]:
             approve_pack(store, result["pack_id"], CONTROLLER, policy)
-    return ds, store, outcomes, reports
+    # September's close is snapshotted BEFORE October lands on the
+    # books: the continuity control compares two packs assembled
+    # from different states of the world, which is the point.
+    september_close = close_pack_export(store, 2026, 9)
+    september_close_again = close_pack_export(store, 2026, 9)
+
+    october = build_october_dataset()
+    ingest_october_dataset(store, objects, october)
+    for day in sorted({l.value_date for l in october.bank_lines}):
+        result = run_day(store, objects, reader, policy, day, actor=ASSEMBLER)
+        for raw in result["outcomes"]:
+            outcomes[raw["bank_line_id"]] = raw
+        reports[day.isoformat()] = result["report"]
+        if result["pack_id"]:
+            approve_pack(store, result["pack_id"], CONTROLLER, policy)
+    return ds, store, outcomes, reports, september_close, september_close_again
 
 
 def _mini_policy(number, premium, broker_id="BRK-TEST"):
@@ -362,6 +441,102 @@ def returns_scenarios() -> dict[str, dict]:
     return {"RETURN-NSF-RESEND": nsf, "RETURN-SUSPENSE-CLOSE": suspense_close}
 
 
+def cancellation_scenarios() -> dict:
+    """The planted return-premium cases, in a small world of their
+    own: a direct policy cancelled mid-term (pro-rata to the cent),
+    a broker-collected policy whose payable names the broker, cash
+    that nets against the payable, and payout packs under the
+    gate's rules — closing with a December payable ledger that
+    foots on its own identity."""
+    from decimal import Decimal as D
+
+    from cash_recon.cancellations import record_cancellation
+    from cash_recon.close_pack import close_pack_export
+    from cash_recon.gate import GateError
+    from cash_recon.payouts import (
+        approve_payout_pack,
+        assemble_payout_pack,
+        payout_file,
+    )
+
+    policy = PolicyConfig()
+    store = InMemoryStore()
+    objects = InMemoryObjectStore()
+    store.upsert_broker(Broker(broker_id="BRK-TEST", name="Testline Brokers",
+                               commission_rate=D("0.10")))
+
+    def installments(number, count, premium):
+        per = premium / count
+        return [Installment(installment_id=f"{number}-I{i + 1}", policy_number=number,
+                            sequence=i + 1, due_date=date(2026, 9, 1), amount_due=per)
+                for i in range(count)]
+
+    store.upsert_receivable(Receivable(
+        policy_number="NSP-6001", insured_name="Insured NSP-6001", broker_id=None,
+        status=PolicyStatus.ACTIVE, installments=installments("NSP-6001", 4, D("12000.00")),
+        term_start=date(2026, 9, 1), term_end=date(2027, 9, 1)))
+    store.upsert_receivable(Receivable(
+        policy_number="NSP-6002", insured_name="Insured NSP-6002", broker_id="BRK-TEST",
+        status=PolicyStatus.ACTIVE, installments=installments("NSP-6002", 1, D("9000.00")),
+        term_start=date(2026, 9, 1), term_end=date(2027, 3, 1)))
+    store.add_bank_line(BankLine(bank_line_id="BL-C1", value_date=date(2026, 9, 2),
+                                 amount=D("6000.00"), payer_name="Insured NSP-6001",
+                                 reference="NSP-6001", narrative=""))
+    store.add_bank_line(BankLine(bank_line_id="BL-C3", value_date=date(2026, 9, 2),
+                                 amount=D("8100.00"), payer_name="Testline Brokers",
+                                 reference="NSP-6002", narrative=""))
+    result = run_day(store, objects, OfflineReader(), policy, date(2026, 9, 2), actor=ASSEMBLER)
+    approve_pack(store, result["pack_id"], CONTROLLER, policy)
+
+    cxl_b = record_cancellation(store, "NSP-6002", date(2026, 11, 1), CONTROLLER, date(2026, 11, 1))
+    cxl_a = record_cancellation(store, "NSP-6001", date(2026, 12, 1), CONTROLLER, date(2026, 12, 1))
+
+    store.add_bank_line(BankLine(bank_line_id="BL-C2", value_date=date(2026, 12, 3),
+                                 amount=D("3000.00"), payer_name="Insured NSP-6001",
+                                 reference="NSP-6001", narrative="installment 3"))
+    dec3 = run_day(store, objects, OfflineReader(), policy, date(2026, 12, 3), actor=ASSEMBLER)
+    approve_pack(store, dec3["pack_id"], CONTROLLER, policy)
+    after_netting = store.payable("PAY-NSP-6001")
+
+    pack_a = assemble_payout_pack(store, date(2026, 12, 4), ["PAY-NSP-6001"], ASSEMBLER)
+    self_refused = False
+    try:
+        approve_payout_pack(store, pack_a.pack_id, ASSEMBLER, policy)
+    except GateError:
+        self_refused = True
+    approve_payout_pack(store, pack_a.pack_id, CONTROLLER, policy)
+    file_a = payout_file(store.payout_pack(pack_a.pack_id))
+
+    pack_b = assemble_payout_pack(store, date(2026, 12, 5), ["PAY-NSP-6002"], ASSEMBLER)
+    second_required = False
+    try:
+        approve_payout_pack(store, pack_b.pack_id, CONTROLLER, policy)
+    except GateError:
+        second_required = True
+    approve_payout_pack(store, pack_b.pack_id, CONTROLLER, policy, second_approver="Sofia Marino")
+
+    december = close_pack_export(store, 2026, 12)["pack"]["return_premiums"]
+    return {
+        "earned_to_the_cent": str(cxl_a.earned_premium),
+        "return_to_insured": str(cxl_a.return_premium),
+        "payee_insured": cxl_a.payee_kind,
+        "return_to_broker": str(cxl_b.return_premium),
+        "payee_broker": cxl_b.payee_name,
+        "netted_on_day_report": dec3["report"]["netted_total"],
+        "day_footing_ok": dec3["report"]["footing_ok"],
+        "payable_after_netting": str(after_netting.remaining),
+        "self_approval_refused": self_refused,
+        "second_approver_required": second_required,
+        "payout_file_carries_final_row": "8.22" in file_a and "PAY-NSP-6001" in file_a,
+        "dec_opening_payables": december["opening_payables"],
+        "dec_opened": december["payables_opened_in_month"],
+        "dec_netted": december["netted_in_month"],
+        "dec_paid": december["paid_in_month"],
+        "dec_closing_payables": december["closing_payables"],
+        "dec_payable_ledger_footed": december["footed"],
+    }
+
+
 def workbench_scenario() -> dict:
     """The workbench flow over two planted exceptions: assignment to
     a rostered member, two handling notes in order, an off-roster
@@ -528,7 +703,7 @@ def import_scenario() -> dict:
 
 
 def score(rows: list[dict]) -> tuple[int, int, list[str]]:
-    _ds, store, outcomes, reports = run_pipeline()
+    _ds, store, outcomes, reports, september_close, september_close_again = run_pipeline()
     packs = {p.pack_id: p for p in store.packs()}
     passed, failures = 0, []
 
@@ -608,6 +783,9 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
             card = {r["broker_id"]: r for r in broker_scorecard(store, date(2026, 9, 21))}
             totals: dict[str, dict[str, D]] = {}
             for day_iso in reports:
+                # The unscoped scorecard is cumulative over everything
+                # on the books, so it foots to every day's split —
+                # September's and October's alike.
                 split_by_broker = day_report(store, date.fromisoformat(day_iso), PolicyConfig())["by_broker"]
                 for broker_id, split in split_by_broker.items():
                     slot = totals.setdefault(broker_id, {"bank": D("0"), "allocated": D("0"), "suspense": D("0")})
@@ -678,10 +856,7 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
             else:
                 passed += 1
         elif row["kind"] == "close":
-            from cash_recon.close_pack import close_pack_export
-
-            export = close_pack_export(store, 2026, 9)
-            again = close_pack_export(store, 2026, 9)
+            export = september_close
             roll = export["pack"]["control_roll"]
             observed = {
                 "opening_suspense": roll["opening_suspense"],
@@ -692,8 +867,65 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 "closing_suspense": roll["closing_suspense"],
                 "footed": roll["footed"],
                 "packs_approved": len(export["pack"]["packs_approved_in_month"]),
-                "digest_stable": export["sha256"] == again["sha256"],
+                "digest_stable": export["sha256"] == september_close_again["sha256"],
             }
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "close_october":
+            from cash_recon.close_pack import close_pack_export
+
+            export = close_pack_export(store, 2026, 10)
+            roll = export["pack"]["control_roll"]
+            observed = {
+                "opening_suspense": roll["opening_suspense"],
+                "september_closing_suspense":
+                    september_close["pack"]["control_roll"]["closing_suspense"],
+                "cash_received_in_month": roll["cash_received_in_month"],
+                "received_into_suspense": roll["received_into_suspense"],
+                "closing_suspense": roll["closing_suspense"],
+                "footed": roll["footed"],
+                "payable_ledger_footed": export["pack"]["return_premiums"]["footed"],
+            }
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "renewal":
+            rec = store.receivable("NSP-1003")
+            by_id = {i.installment_id: i for i in rec.installments}
+            named = by_id["NSP-1003-I5"]
+            older = by_id["NSP-1003-I2"]
+            observed = {
+                "installments": len(rec.installments),
+                "named_installment": "NSP-1003-I5",
+                "named_status": named.status.value,
+                "named_applied": str(named.amount_applied),
+                "older_open_installment": "NSP-1003-I2",
+                "older_open_balance": str(older.amount_due - older.amount_applied),
+            }
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "cancellations":
+            observed = cancellation_scenarios()
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()
