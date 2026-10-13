@@ -29,6 +29,7 @@ from .dataset import build_dataset
 from .gate import GateError
 from .llm import make_reader
 from .logging_setup import configure_logging, new_request_id
+from .nonpremium import non_premium_ledger
 from .objects import ObjectStore, make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
 from .pipeline import ingest_dataset, run_day
@@ -258,6 +259,17 @@ def create_app(service: Service | None = None) -> FastAPI:
     def scorecard(as_of: date | None = None):
         s = get_service()
         return report_mod.broker_scorecard(s.store, as_of or date.today())
+
+    @app.get("/api/non-premium")
+    def non_premium(month: str | None = None):
+        s = get_service()
+        parsed = None
+        if month:
+            try:
+                parsed = parse_month(month)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        return non_premium_ledger(s.store, month=parsed)
 
     @app.get("/api/close/{month}")
     def close(month: str):

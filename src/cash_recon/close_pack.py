@@ -57,6 +57,7 @@ from decimal import Decimal
 
 from .models import ReturnPremiumPayable
 from .money import ZERO, as_str
+from .nonpremium import non_premium_ledger
 from .report import BUCKETS, broker_scorecard, proposal_quality
 from .store import Store
 
@@ -123,6 +124,16 @@ def _positions(store: Store) -> tuple[list[_Position], dict[str, Decimal]]:
                 releases[entry.allocation.bank_line_id].append(
                     (pack.value_date, entry.allocation.amount)
                 )
+            elif pack.pack_id.startswith("PACK-COMB"):
+                # Combination packs release suspense like re-match
+                # packs — their legs were suspense cash until the
+                # pair was proposed — except that a rejected
+                # combination frees its legs (the gate re-opens
+                # their items), so a rejected pack releases nothing.
+                if pack.status.value != "rejected":
+                    releases[entry.allocation.bank_line_id].append(
+                        (pack.value_date, entry.allocation.amount)
+                    )
             else:
                 day_alloc[entry.allocation.bank_line_id] += entry.allocation.amount
     positions = []
@@ -415,9 +426,58 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         "suspense_aging_at_month_end": _aging(positions, last),
         "broker_scorecard": broker_scorecard(store, last, month=(year, month)),
         "proposal_quality": proposal_quality(store, month=(year, month)),
+        "combination_settlements": _combination_section(store, first, last),
+        "non_premium": non_premium_ledger(store, month=(year, month)),
         "discrepancies": discrepancies,
     }
     return body
+
+
+def _combination_section(store: Store, first: date, last: date) -> dict:
+    """The month's combination settlements, distinct from ordinary
+    allocations: pairs of same-payer wires that together settled
+    one open installment exactly, each itemised with both legs.
+    `settled_total` counts approved packs — money that actually
+    applied; proposed combinations are listed with their status so
+    a pair still waiting at the gate is visible, not silently
+    inside or outside the number. The suspense releases these
+    packs made are already inside the control roll's
+    applied-from-suspense term; this section is the explanation,
+    not a second counting."""
+    items: list[dict] = []
+    settled_total = ZERO
+    for pack in sorted(store.packs(), key=lambda p: p.pack_id):
+        if not pack.pack_id.startswith("PACK-COMB"):
+            continue
+        if not (first <= pack.value_date <= last):
+            continue
+        by_comb: dict[str, dict] = {}
+        for entry in pack.entries:
+            if entry.combination_id and entry.allocation:
+                slot = by_comb.setdefault(entry.combination_id, {
+                    "combination_id": entry.combination_id,
+                    "pack_id": pack.pack_id,
+                    "status": pack.status.value,
+                    "policy_number": entry.allocation.policy_number,
+                    "installment_id": entry.allocation.installment_id,
+                    "legs": [],
+                    "cash_total": ZERO,
+                })
+                slot["legs"].append({
+                    "bank_line_id": entry.allocation.bank_line_id,
+                    "amount": as_str(entry.allocation.amount),
+                })
+                slot["cash_total"] += entry.allocation.amount
+        for slot in by_comb.values():
+            if slot["status"] == "approved":
+                settled_total += slot["cash_total"]
+            slot["cash_total"] = as_str(slot["cash_total"])
+            items.append(slot)
+    return {
+        "count": len(items),
+        "settled_total": as_str(settled_total),
+        "items": items,
+    }
 
 
 def pack_digest(body: dict) -> str:
@@ -520,6 +580,27 @@ def render_close_pack_text(export: dict) -> str:
                 f"      {item['bank_line_id']:<10} {item['amount']:>10}  "
                 f"{item['age_days']} days — {item['reason']}"
             )
+    combos = body.get("combination_settlements") or {"count": 0, "settled_total": "0.00", "items": []}
+    if combos["count"]:
+        out += ["", f"COMBINATION SETTLEMENTS ({combos['count']}) — settled via approved pairs: {combos['settled_total']}"]
+        for c in combos["items"]:
+            legs = " + ".join(f"{leg['bank_line_id']} {leg['amount']}" for leg in c["legs"])
+            out.append(
+                f"  {c['combination_id']} · {legs} → {c['installment_id']} · "
+                f"cash {c['cash_total']} · [{c['status']}] in {c['pack_id']}"
+            )
+    non_premium = body.get("non_premium") or {"posted_total": "0.00", "by_kind": {}, "items": []}
+    if non_premium["items"]:
+        out += ["", f"NON-PREMIUM DISPOSITIONS — posted to the non-premium ledger: {non_premium['posted_total']}"]
+        for kind, slot in non_premium["by_kind"].items():
+            out.append(
+                f"  {kind:<18} {slot['count']} line(s) · approved {slot['approved']} · "
+                f"proposed {slot['proposed']} · rejected {slot['rejected']}"
+            )
+        out.append(
+            "  Non-premium cash never enters suspense and never touches a "
+            "receivable; it is a term of the days' footing, not of this roll."
+        )
     quality = body.get("proposal_quality") or {"by_kind": {}, "totals": {"proposals": 0}}
     if quality["totals"]["proposals"]:
         out += ["", "MODEL PROPOSAL QUALITY (packs decided with this month's value dates)"]

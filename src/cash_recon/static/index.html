@@ -74,6 +74,10 @@
     <p id="footing" class="note"></p>
     <h3>By broker</h3><div id="bybroker"></div>
     <h3>Re-match recoveries this day</h3><div id="rematchreport"></div>
+    <h3>Combination settlements proposed this day</h3><div id="combreport"></div>
+    <h3>Non-premium dispositions</h3>
+    <p class="note">Lines that are not premium cash at all — classified in code by exact config rules before the tiers, routed to a disposition pack (NPACK) at the same gate. They never enter suspense and never touch a receivable; they are a separate term of the day's footing above.</p>
+    <div id="nonpremiumreport"></div>
     <h3>Payment returns</h3>
     <p class="note">Cash the bank took back. A return is recorded against an <em>applied</em> bank line: its allocations reverse exactly, the packs that carried it are flagged RETURN_AFFECTED (their entries stand), and any suspense it held is released. Full-line returns only — a part-return is refused, in words. If the payer re-sends, the new line is matched on its own merits and linked to the returned original.</p>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
@@ -216,6 +220,7 @@ async function loadReport() {
     ["Returned (of this day's lines)", rep.returned_total || "0.00"],
     ["Allocated, net of returns", rep.allocated_net_of_returns || rep.allocated_total],
     ["Posted (approved)", rep.posted_total], ["In suspense", rep.suspense_total],
+    ["Non-premium", (rep.non_premium || {}).total || "0.00"],
     ["Bank lines", rep.bank_lines]
   ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${typeof v === "number" ? v : money(v)}</div></div>`).join("");
   $("footing").innerHTML = `<span class="pill ${rep.footing_ok ? "ok" : "bad"}">${rep.footing_ok ? "Reconciled" : "NOT reconciled"}</span> ${rep.footing_note}`;
@@ -227,6 +232,22 @@ async function loadReport() {
     ? table([{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Recovered", num: 1, render: r => money(r.amount)}], rec.items)
       + `<p class="note">${rec.recovered_lines} line(s), ${money(rec.recovered_total)} recovered by the re-match pass — proposed at the gate in a PACK-REMATCH pack.</p>`
     : "<p class='note'>No re-match recoveries on this day.</p>";
+  const combos = rep.combination_settlements || {count: 0, total: "0.00", items: []};
+  $("combreport").innerHTML = combos.count
+    ? table([{key: "combination_id", label: "Combination"},
+             {label: "Legs", render: r => r.legs.map(l => `${l.bank_line_id} ${money(l.amount)}`).join(" + ")},
+             {key: "installment_id", label: "Settles"},
+             {key: "cash_total", label: "Cash", num: 1, render: r => money(r.cash_total)},
+             {key: "pack_id", label: "Pack"}, {key: "status", label: "Status"}], combos.items)
+      + `<p class="note">${combos.count} combination(s) proposed this day, ${money(combos.total)} of cash: two wires from the same payer that together settle one open installment exactly, priced leg by leg. Approval applies both legs together, or neither.</p>`
+    : "<p class='note'>No combination settlements proposed on this day.</p>";
+  const np = rep.non_premium || {count: 0, total: "0.00", items: []};
+  $("nonpremiumreport").innerHTML = np.count
+    ? table([{key: "bank_line_id", label: "Bank line"}, {key: "kind", label: "Sub-kind"},
+             {key: "payer_name", label: "Payer"},
+             {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
+             {key: "pack_id", label: "Disposition pack"}, {key: "status", label: "Status"}], np.items)
+    : "<p class='note'>No non-premium lines on this day.</p>";
   const rets = rep.returns_recorded || {count: 0, total: "0.00", items: []};
   $("returnsreport").innerHTML = rets.count
     ? table([{key: "return_id", label: "Return"}, {key: "bank_line_id", label: "Bank line"},
@@ -301,6 +322,17 @@ async function loadClose() {
            {key: "allocation_total", label: "Allocations", num: 1, render: r => money(r.allocation_total)},
            {key: "write_off_total", label: "Write-offs", num: 1, render: r => money(r.write_off_total)},
            {label: "Flags", render: r => (r.flags || []).join(", ") || "—"}], p.packs_approved_in_month) +
+    ((p.combination_settlements && p.combination_settlements.count) ? `<h3>Combination settlements in the month</h3>` + table(
+      [{key: "combination_id", label: "Combination"},
+       {label: "Legs", render: r => r.legs.map(l => `${l.bank_line_id} ${money(l.amount)}`).join(" + ")},
+       {key: "installment_id", label: "Settles"},
+       {key: "cash_total", label: "Cash", num: 1, render: r => money(r.cash_total)},
+       {key: "status", label: "Status"}], p.combination_settlements.items)
+      + `<p class="note">Settled via approved pairs: ${money(p.combination_settlements.settled_total)} — already inside the roll's applied-from-suspense term; this section is the explanation, not a second counting.</p>` : "") +
+    ((p.non_premium && p.non_premium.items.length) ? `<h3>Non-premium dispositions in the month</h3>` + table(
+      [{key: "k", label: "Sub-kind"}, {key: "v", label: "Dispositions", num: 1}], Object.entries(p.non_premium.by_kind).map(([kind, s]) =>
+        ({k: kind, v: `${s.count} line(s) · approved ${money(s.approved)} · proposed ${money(s.proposed)} · rejected ${money(s.rejected)}`})))
+      + `<p class="note">Posted to the non-premium ledger: ${money(p.non_premium.posted_total)}. Non-premium cash never enters suspense and never touches a receivable.</p>` : "") +
     ((p.proposal_quality && p.proposal_quality.totals.proposals) ? `<h3>Model proposal quality in the month</h3>` + table(
       [{key: "k", label: "Kind"}, {key: "v", label: "Outcome split", num: 1}], Object.entries(p.proposal_quality.by_kind).map(([kind, s]) =>
         ({k: kind, v: `${s.proposals} proposed · ${s.accepted_as_proposed} as proposed · ${s.accepted_with_edits} with edits · ${s.rejected} rejected · value edited ${money(s.value_edited)}`}))) : "") +
@@ -579,6 +611,7 @@ async function loadPacks() {
   $("packs").innerHTML = packs.map(p => {
     const alloc = p.entries.filter(e => e.kind === "allocation").reduce((s, e) => s + Number(e.allocation.amount), 0);
     const wo = p.entries.filter(e => e.kind === "write_off").reduce((s, e) => s + Number(e.write_off_amount), 0);
+    const npTot = p.entries.filter(e => e.kind === "non_premium").reduce((s, e) => s + Number(e.non_premium.amount), 0);
     const actions = p.status === "proposed"
       ? `<button onclick="act('${p.pack_id}','approve')">Approve</button>
          <button class="ghost" onclick="editEntries('${p.pack_id}')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Edit entries</button>
@@ -586,14 +619,14 @@ async function loadPacks() {
          <a href="/api/packs/${p.pack_id}/posting-file">posting file</a>`
       : (p.status === "approved" ? `<a href="/api/packs/${p.pack_id}/posting-file">posting file (CSV)</a>` : "");
     return `<h3>${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span>${(p.flags || []).map(f => ` <span class="pill bad">${f}</span>`).join("")}</h3>
-      <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}. Approvals: ${p.approvals.join(", ") || "—"}${(p.flags || []).includes("RETURN_AFFECTED") ? " A line in this pack was returned by the bank; the entries stand as approved and the reversal lives on the return record." : ""}</p>
+      <p class="note">Assembled by ${p.assembled_by}. Allocations ${money(alloc)} across ${p.entries.filter(e => e.kind === "allocation").length} entries; write-offs ${money(wo)}${npTot ? `; non-premium dispositions ${money(npTot)}` : ""}. Approvals: ${p.approvals.join(", ") || "—"}${(p.flags || []).includes("RETURN_AFFECTED") ? " A line in this pack was returned by the bank; the entries stand as approved and the reversal lives on the return record." : ""}</p>
       <p>${actions}</p>` +
       table([{label: "#", render: (r, i) => i},
              {key: "kind", label: "Kind"},
-             {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.payable_offset ? r.payable_offset.policy_number : (r.write_off_policy || ""))},
-             {label: "Installment / detail", render: r => r.allocation ? r.allocation.installment_id : (r.payable_offset ? ("netted against payable " + r.payable_offset.payable_id) : ("write-off " + (r.write_off_exception_id || "")))},
-             {label: "Amount", num: 1, render: r => money(r.allocation ? r.allocation.amount : (r.payable_offset ? r.payable_offset.amount : r.write_off_amount))},
-             {label: "Tier", render: r => r.allocation ? (r.allocation.tier || "PROPOSED") + (r.auto_applied ? " · auto-appliable" : "") : ""},
+             {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.payable_offset ? r.payable_offset.policy_number : (r.non_premium ? r.non_premium.payer_name : (r.write_off_policy || "")))},
+             {label: "Installment / detail", render: r => r.allocation ? r.allocation.installment_id : (r.payable_offset ? ("netted against payable " + r.payable_offset.payable_id) : (r.non_premium ? ("non-premium " + r.non_premium.kind + " — " + r.non_premium.bank_line_id) : ("write-off " + (r.write_off_exception_id || ""))))},
+             {label: "Amount", num: 1, render: r => money(r.allocation ? r.allocation.amount : (r.payable_offset ? r.payable_offset.amount : (r.non_premium ? r.non_premium.amount : r.write_off_amount)))},
+             {label: "Tier", render: r => r.allocation ? (r.combination_id ? "COMBINATION" : (r.allocation.tier || "PROPOSED")) + (r.auto_applied ? " · auto-appliable" : "") : ""},
              {label: "Proposal", render: r => r.proposal_kind ? `${r.proposal_kind.replace("_", " ")} · ${r.proposed_by || ""}` : "—"},
              {label: "Edits at the gate", render: r => (r.edits || []).length ? r.edits.map(e => `${e.before_policy}/${e.before_installment} ${money(e.before_amount)} → ${e.after_policy}/${e.after_installment} ${money(e.after_amount)} (by ${e.by})`).join("; ") : "—"}], p.entries);
   }).join("") || "<p class='note'>No packs yet. Seed the month and run a day.</p>";

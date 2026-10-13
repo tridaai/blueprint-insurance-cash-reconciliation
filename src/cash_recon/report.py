@@ -21,6 +21,70 @@ from .store import Store
 BUCKETS = [(0, 7, "0–7 days"), (8, 30, "8–30 days"), (31, 60, "31–60 days"), (61, None, "60+ days")]
 
 
+def non_premium_view(store: Store, day: date) -> dict:
+    """The day's non-premium dispositions: lines the classifier
+    routed out of the premium pipeline, standing in their NPACK
+    disposition packs. These amounts are a term of the day's
+    footing — the cash is in the bank total, but it is not premium
+    and never enters suspense — and the pack's status says how far
+    the gate has taken them."""
+    items: list[dict] = []
+    total = ZERO
+    for pack in store.packs(on=day):
+        if not pack.pack_id.startswith("NPACK-"):
+            continue
+        for entry in pack.entries:
+            if entry.non_premium:
+                np = entry.non_premium
+                total += np.amount
+                items.append({
+                    "bank_line_id": np.bank_line_id,
+                    "kind": np.kind,
+                    "amount": str(np.amount),
+                    "payer_name": np.payer_name,
+                    "pack_id": pack.pack_id,
+                    "status": pack.status.value,
+                })
+    return {"total": str(total), "count": len(items), "items": items}
+
+
+def combination_settlements(store: Store, day: date) -> dict:
+    """Combination settlements proposed on this day, as their own
+    section: pairs of same-payer wires whose cash together settles
+    one open installment exactly, standing in PACK-COMB packs at
+    the gate. Each combination is itemised leg by leg — the money
+    is two payers' wires no longer, but it is still two bank lines,
+    and the report keeps both names on it."""
+    prefix = f"PACK-COMB-{day.isoformat()}"
+    combos: list[dict] = []
+    total = ZERO
+    for pack in store.packs():
+        if pack.pack_id != prefix and not pack.pack_id.startswith(prefix + "-"):
+            continue
+        by_comb: dict[str, dict] = {}
+        for entry in pack.entries:
+            if entry.combination_id and entry.allocation:
+                slot = by_comb.setdefault(entry.combination_id, {
+                    "combination_id": entry.combination_id,
+                    "policy_number": entry.allocation.policy_number,
+                    "installment_id": entry.allocation.installment_id,
+                    "pack_id": pack.pack_id,
+                    "status": pack.status.value,
+                    "legs": [],
+                    "cash_total": ZERO,
+                })
+                slot["legs"].append({
+                    "bank_line_id": entry.allocation.bank_line_id,
+                    "amount": str(entry.allocation.amount),
+                })
+                slot["cash_total"] += entry.allocation.amount
+        for slot in by_comb.values():
+            slot["cash_total"] = str(slot["cash_total"])
+            total += sum((Decimal(leg["amount"]) for leg in slot["legs"]), ZERO)
+            combos.append(slot)
+    return {"total": str(total), "count": len(combos), "items": combos}
+
+
 def rematch_recoveries(store: Store, day: date) -> dict:
     """Cash the re-match pass recovered on this day, as its own line:
     the allocations that entered through a PACK-REMATCH-<day> pack,
@@ -219,7 +283,16 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
         bucket["netted"] += netted_by_line.get(line.bank_line_id, ZERO)
         bucket["suspense"] += susp_by_line.get(line.bank_line_id, ZERO)
 
-    footing_ok = bank_total == allocated_total + netted_total + suspense_total
+    non_premium = non_premium_view(store, day)
+    non_premium_total = Decimal(non_premium["total"])
+    # Lines a combination proposal settled (or holds) still belong
+    # to their own days' footing through the ordinary terms: their
+    # allocations count in allocated_total once the combination
+    # pass has saved them, and their suspense items are held
+    # resolved from proposal, so the identity needs no extra term.
+    footing_ok = (
+        bank_total == allocated_total + netted_total + suspense_total + non_premium_total
+    )
     stale = [
         i for i in store.suspense_items()
         if i.status == "open" and i.age_days(day) > policy.stale_suspense_days
@@ -245,14 +318,18 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
         "reconciled": footing_ok,
         "footing_note": (
             (
-                "Bank total equals applied plus cash netted against return-premium "
-                "payables plus suspense, to the cent."
-                if netted_total > ZERO
-                else "Bank total equals applied plus suspense, to the cent."
+                "Bank total equals applied"
+                + (" plus cash netted against return-premium payables"
+                   if netted_total > ZERO else "")
+                + " plus suspense"
+                + (" plus non-premium dispositions (cash that is not premium "
+                   "and never enters suspense)" if non_premium_total > ZERO else "")
+                + ", to the cent."
             )
             if footing_ok
             else f"FOOTING FAILURE: bank {bank_total} != applied {allocated_total} "
-            f"+ netted {netted_total} + suspense {suspense_total}. The day is NOT reconciled."
+            f"+ netted {netted_total} + suspense {suspense_total} "
+            f"+ non-premium {non_premium_total}. The day is NOT reconciled."
         ),
         "netted_total": str(netted_total),
         "return_premiums": _return_premium_day_lines(store, day, netted_total),
@@ -272,6 +349,8 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
             k: {kk: str(vv) for kk, vv in v.items()} for k, v in sorted(by_broker.items())
         },
         "rematch_recoveries": rematch_recoveries(store, day),
+        "non_premium": non_premium,
+        "combination_settlements": combination_settlements(store, day),
         "suspense_aging": suspense_aging(store, day),
         "stale_suspense": [
             {

@@ -21,6 +21,7 @@ from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .gate import GateError
 from .llm import make_reader
+from .nonpremium import non_premium_ledger
 from .objects import make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
 from .pipeline import ingest_dataset, run_day
@@ -53,6 +54,8 @@ def main() -> None:
     clo.add_argument("month", help="YYYY-MM")
     clo.add_argument("--format", choices=("json", "text"), default="json")
     sub.add_parser("trends", help="the match-quality trend watch: per-month figures, deltas, and named deteriorations (or within tolerance)")
+    npl = sub.add_parser("non-premium", help="the non-premium ledger view: classified dispositions by sub-kind, with the gate's state")
+    npl.add_argument("--month", help="YYYY-MM; default: all months")
     imp = sub.add_parser("import-statement", help="import a generic bank statement CSV")
     imp.add_argument("path", help="path to the statement CSV")
     ret = sub.add_parser("return", help="record a bank return against an applied bank line")
@@ -129,6 +132,9 @@ def main() -> None:
         print(json.dumps(broker_scorecard(store, as_of), indent=2))
     elif args.command == "trends":
         print(json.dumps(match_quality(store, WatchPolicy.from_env()), indent=2))
+    elif args.command == "non-premium":
+        month = parse_month(args.month) if args.month else None
+        print(json.dumps(non_premium_ledger(store, month=month), indent=2))
     elif args.command == "close":
         year, month = parse_month(args.month)
         export = close_pack_export(store, year, month)

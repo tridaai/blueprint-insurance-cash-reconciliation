@@ -117,6 +117,8 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
     gate_history: list[dict] = []
     posted = pending = rejected = ZERO
     offsets_posted = offsets_pending = ZERO
+    np_posted = np_pending = np_rejected = ZERO
+    non_premium_disposition = None
     pack_ids: list[str] = []
     exc_ids = {e.exception_id for e in exceptions}
     for pack in packs:
@@ -183,6 +185,23 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
                     offsets_posted += o.amount
                 elif pack.status.value == "proposed":
                     offsets_pending += o.amount
+            elif entry.non_premium and entry.non_premium.bank_line_id == bank_line_id:
+                np = entry.non_premium
+                non_premium_disposition = {
+                    "pack_id": pack.pack_id,
+                    "pack_status": pack.status.value,
+                    "entry_index": idx,
+                    "kind": np.kind,
+                    "amount": as_str(np.amount),
+                    "payer_name": np.payer_name,
+                }
+                entries_for_line.append(idx)
+                if pack.status.value == "approved":
+                    np_posted += np.amount
+                elif pack.status.value == "proposed":
+                    np_pending += np.amount
+                else:
+                    np_rejected += np.amount
             elif entry.kind == "write_off" and entry.write_off_exception_id in exc_ids:
                 write_offs.append({
                     "pack_id": pack.pack_id,
@@ -201,9 +220,17 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
                 if e.action == "pack_rejected" and e.subject == pack.pack_id:
                     rejection = {"by": e.actor, "at": e.at.isoformat(),
                                  "reason": e.detail}
+            if pack.pack_id.startswith("PACK-REMATCH"):
+                pack_kind = "rematch"
+            elif pack.pack_id.startswith("PACK-COMB"):
+                pack_kind = "combination"
+            elif pack.pack_id.startswith("NPACK-"):
+                pack_kind = "non_premium_disposition"
+            else:
+                pack_kind = "posting"
             gate_history.append({
                 "pack_id": pack.pack_id,
-                "kind": "rematch" if pack.pack_id.startswith("PACK-REMATCH") else "posting",
+                "kind": pack_kind,
                 "value_date": pack.value_date.isoformat(),
                 "assembled_by": pack.assembled_by,
                 "status": pack.status.value,
@@ -258,6 +285,16 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
             f"{ret.return_date} by {ret.recorded_by}); its application stands "
             "reversed and its suspense released."
         )
+    elif non_premium_disposition is not None:
+        state = "classified non-premium"
+        state_detail = (
+            f"Classified {non_premium_disposition['kind']} in code before the "
+            f"tiers: not premium cash. It stands in disposition pack "
+            f"{non_premium_disposition['pack_id']} ({non_premium_disposition['pack_status']})"
+            + (" — posted to the non-premium ledger view."
+               if non_premium_disposition["pack_status"] == "approved" else
+               " — at the gate, or decided; it never enters premium suspense.")
+        )
     elif posted > ZERO and suspense_open == ZERO and pending == ZERO:
         state = "applied"
         state_detail = "Settled under approved pack(s); nothing outstanding."
@@ -287,6 +324,7 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
     accounted = (
         posted - reversed_amount + pending
         + offsets_posted + offsets_pending
+        + np_posted + np_pending
         + suspense_open + returned_amount
     )
     foots = accounted == line.amount
@@ -296,6 +334,8 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         f"allocations at the gate {as_str(pending)}" if pending > ZERO else None,
         f"payable offsets posted {as_str(offsets_posted)}" if offsets_posted > ZERO else None,
         f"payable offsets at the gate {as_str(offsets_pending)}" if offsets_pending > ZERO else None,
+        f"non-premium disposition posted {as_str(np_posted)}" if np_posted > ZERO else None,
+        f"non-premium disposition at the gate {as_str(np_pending)}" if np_pending > ZERO else None,
         f"suspense open {as_str(suspense_open)}" if suspense_open > ZERO else None,
         f"returned to the payer {as_str(returned_amount)}" if ret else None,
     ]
@@ -308,6 +348,9 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         f"(difference {as_str(accounted - line.amount)})."
         + (f" {as_str(rejected)} of allocations stand on rejected pack(s) and "
            "settle nothing until the line is re-worked." if rejected > ZERO else "")
+        + (f" Its non-premium disposition of {as_str(np_rejected)} stands on a "
+           "rejected pack and posts nothing until the line is re-presented."
+           if np_rejected > ZERO else "")
     )
 
     # -- the audit trail --------------------------------------------------
@@ -328,6 +371,7 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         "attempts": attempts,
         "allocations": allocations,
         "payable_offsets": offsets,
+        "non_premium": non_premium_disposition,
         "write_offs": write_offs,
         "exceptions": exc_views,
         "suspense": [_json(i) for i in suspense],
