@@ -243,11 +243,22 @@ class InMemoryStore:
 
     # -- outcomes -----------------------------------------------------------
     def save_allocations(self, allocs, pack_id):
-        self._allocations.extend((pack_id, copy.deepcopy(a)) for a in allocs)
+        # The SQL stores key the index by (bank_line_id, installment_id)
+        # and ignore a second save of the same pair — a line's cash for
+        # one installment is indexed once, whoever assembles it. The
+        # double implements the same contract, so re-saving a pack's
+        # allocations cannot double the index here either.
+        have = {(a.bank_line_id, a.installment_id) for _p, a in self._allocations}
+        for a in allocs:
+            key = (a.bank_line_id, a.installment_id)
+            if key in have:
+                continue
+            have.add(key)
+            self._allocations.append((pack_id, copy.deepcopy(a)))
 
     def replace_allocations(self, allocs, pack_id):
         self._allocations = [(p, a) for p, a in self._allocations if p != pack_id]
-        self._allocations.extend((pack_id, copy.deepcopy(a)) for a in allocs)
+        self.save_allocations(allocs, pack_id)
 
     def allocations(self, bank_line_id=None):
         if bank_line_id is None:
@@ -265,7 +276,12 @@ class InMemoryStore:
         self._exceptions[exc.exception_id] = copy.deepcopy(exc)
 
     def add_suspense(self, item):
-        self._suspense[item.suspense_id] = copy.deepcopy(item)
+        # Insert-only, as the SQL stores are (ON CONFLICT DO NOTHING):
+        # a second add of the same item must not resurrect a resolved
+        # record or re-price cash already on the ledger. save_suspense
+        # is the upsert.
+        if item.suspense_id not in self._suspense:
+            self._suspense[item.suspense_id] = copy.deepcopy(item)
 
     def save_suspense(self, item):
         self._suspense[item.suspense_id] = copy.deepcopy(item)

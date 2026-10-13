@@ -123,6 +123,15 @@ def battery(store, tag: str = "") -> None:
     store.save_suspense(item)
     mine = [i for i in store.suspense_items() if i.suspense_id == item.suspense_id]
     assert mine and mine[0].reason == "OVERPAID" and mine[0].amount == D("50.00")
+    # A second add of the same id changes nothing on any store: the
+    # record on the ledger stands (a re-run cannot resurrect or
+    # re-price it by adding again).
+    store.add_suspense(SuspenseItem(
+        suspense_id=item.suspense_id, bank_line_id="BL-001", amount=D("99.00"),
+        received_date=date(2026, 9, 2), reason="UNIDENTIFIED", status="open",
+    ))
+    mine = [i for i in store.suspense_items() if i.suspense_id == item.suspense_id]
+    assert len(mine) == 1 and mine[0].amount == D("50.00") and mine[0].reason == "OVERPAID"
 
     # Packs: saved, fetched, listed by date.
     pack = PostingPack(pack_id=f"PACK-{tag}BATTERY", value_date=date(2026, 9, 2),
@@ -149,6 +158,10 @@ def battery(store, tag: str = "") -> None:
     alloc = Allocation(bank_line_id=f"BL-{tag}ALLOC", policy_number="NSP-1001",
                        installment_id="NSP-1001-I1", amount=D("10.00"), tier=None,
                        currency="EUR", fx_rate=D("1.08"), functional_amount=D("10.80"))
+    store.save_allocations([alloc], f"PACK-{tag}BATTERY")
+    assert [a.amount for a in store.allocations(alloc.bank_line_id)] == [D("10.00")]
+    # Saving the same (bank line, installment) again indexes nothing
+    # twice, on any store — the pair is the index's key, not the call.
     store.save_allocations([alloc], f"PACK-{tag}BATTERY")
     assert [a.amount for a in store.allocations(alloc.bank_line_id)] == [D("10.00")]
     alloc.amount = D("12.00")
