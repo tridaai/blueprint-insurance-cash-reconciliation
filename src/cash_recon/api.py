@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from . import gate, report as report_mod
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
+from .line_export import LineExportError, line_export, render_line_export_text
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .gate import GateError
@@ -376,6 +377,25 @@ def create_app(service: Service | None = None) -> FastAPI:
         if history["bank_line"] is None:
             raise HTTPException(404, f"no such bank line: {bank_line_id}")
         return history
+
+    @app.get("/api/bank-lines/{bank_line_id}/audit-export")
+    def bank_line_audit_export(bank_line_id: str):
+        s = get_service()
+        try:
+            return line_export(s.store, bank_line_id)
+        except LineExportError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/bank-lines/{bank_line_id}/audit-export/text")
+    def bank_line_audit_export_text(bank_line_id: str):
+        s = get_service()
+        try:
+            export = line_export(s.store, bank_line_id)
+        except LineExportError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return PlainTextResponse(
+            render_line_export_text(export), media_type="text/plain"
+        )
 
     @app.get("/api/packs/{pack_id}/posting-file")
     def posting_file(pack_id: str):

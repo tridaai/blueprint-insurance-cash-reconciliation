@@ -14,6 +14,7 @@ from datetime import date
 
 from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
+from .line_export import LineExportError, line_export, render_line_export_text
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
 from .gate import GateError
@@ -60,6 +61,9 @@ def main() -> None:
                      help="amount the bank returned; anything but the full line amount is refused")
     hist = sub.add_parser("history", help="one bank line's whole chain: application, return, re-application")
     hist.add_argument("bank_line_id")
+    aud = sub.add_parser("audit-export", help="the per-line audit export: every cent and every act, digested")
+    aud.add_argument("bank_line_id")
+    aud.add_argument("--format", choices=("json", "text"), default="json")
     wb = sub.add_parser("workbench", help="the exception workbench: the open queue, oldest first, counts that foot")
     wb.add_argument("--as-of", default=None, help="YYYY-MM-DD (default today)")
     wb.add_argument("--code", default=None)
@@ -153,6 +157,15 @@ def main() -> None:
         print(json.dumps(json.loads(dump(recorded)), indent=2))
     elif args.command == "history":
         print(json.dumps(line_history(store, args.bank_line_id), indent=2))
+    elif args.command == "audit-export":
+        try:
+            export = line_export(store, args.bank_line_id)
+        except LineExportError as exc:
+            parser.exit(1, f"audit export refused: {exc}\n")
+        if args.format == "text":
+            print(render_line_export_text(export), end="")
+        else:
+            print(json.dumps(export, indent=2))
     elif args.command == "workbench":
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         print(json.dumps(workbench_view(

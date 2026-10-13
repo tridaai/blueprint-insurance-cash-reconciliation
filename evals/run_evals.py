@@ -223,6 +223,19 @@ def golden_rows() -> list[dict]:
             "lines_after_refusal": 4,
         },
     })
+    rows.append({
+        "case": "AUDIT-EXPORT", "kind": "line_export",
+        "expect": {
+            "rich_attempt_stages": ["T4_REMITTANCE"],
+            "rich_allocations": 2, "rich_gate_edits": 2,
+            "rich_return_id": "RET-BL-Q1", "rich_resent_as": ["BL-Q2"],
+            "resend_of": "BL-Q1", "resend_return_link": "RET-BL-Q1",
+            "rich_foots": True, "rich_accounted": "4500.00",
+            "digest_stable": True, "books_unchanged": True,
+            "t1_attempt_stages": ["DUPLICATE_CHECK", "T1_EXACT"],
+            "t1_foots": True, "t1_state": "applied",
+        },
+    })
     return rows
 
 
@@ -702,6 +715,87 @@ def import_scenario() -> dict:
     }
 
 
+def line_export_scenario() -> dict:
+    """The per-line audit export over a rich line — a remittance
+    read, edited at the gate, approved, returned, re-sent — and a
+    plain T1 line: the export must trace every cent and every act,
+    foot, regenerate byte-identically, and change nothing."""
+    from decimal import Decimal as D
+
+    from cash_recon import gate
+    from cash_recon.line_export import line_export
+    from cash_recon.returns import record_return
+
+    policy = PolicyConfig()
+    broker = Broker(broker_id="BRK-TEST", name="Testline Brokers", commission_rate=D("0.10"))
+    store = InMemoryStore()
+    objects = InMemoryObjectStore()
+    store.upsert_broker(broker)
+    store.upsert_receivable(_mini_policy("NSP-2001", D("2000.00")))
+    store.upsert_receivable(_mini_policy("NSP-2002", D("3000.00")))
+    store.add_remittance(Remittance(
+        remittance_id="REM-Q1", broker_id="BRK-TEST", received_date=date(2026, 9, 5),
+        stated_total=None,
+        text=_mini_advice("2026-09-05", [("NSP-2001", "Alpha Test Co", D("1800.00")),
+                                         ("NSP-2002", "Beta Test Co", D("2700.00"))], D("4500.00"))))
+    store.add_bank_line(BankLine(bank_line_id="BL-Q1", value_date=date(2026, 9, 5),
+                                 amount=D("4500.00"), payer_name="Testline Brokers",
+                                 reference=None, narrative="wire — see remittance advice"))
+    result = run_day(store, objects, OfflineReader(), policy, date(2026, 9, 5), actor=ASSEMBLER)
+    pack = store.pack(result["pack_id"])
+    idx = {e.allocation.policy_number: i for i, e in enumerate(pack.entries)}
+    gate.edit_pack_entries(store, result["pack_id"], CONTROLLER, [
+        {"entry_index": idx["NSP-2001"], "new_amount": D("1700.00")},
+        {"entry_index": idx["NSP-2002"], "new_amount": D("2800.00")},
+    ])
+    gate.approve_pack(store, result["pack_id"], CONTROLLER, policy)
+    record_return(store, "BL-Q1", "NSF", CONTROLLER, date(2026, 9, 7))
+    store.add_remittance(Remittance(
+        remittance_id="REM-Q2", broker_id="BRK-TEST", received_date=date(2026, 9, 8),
+        stated_total=None,
+        text=_mini_advice("2026-09-08", [("NSP-2001", "Alpha Test Co", D("1800.00")),
+                                         ("NSP-2002", "Beta Test Co", D("2700.00"))], D("4500.00"))))
+    store.add_bank_line(BankLine(bank_line_id="BL-Q2", value_date=date(2026, 9, 8),
+                                 amount=D("4500.00"), payer_name="Testline Brokers",
+                                 reference=None, narrative="wire — see remittance advice"))
+    resent = run_day(store, objects, OfflineReader(), policy, date(2026, 9, 8), actor=ASSEMBLER)
+    gate.approve_pack(store, resent["pack_id"], CONTROLLER, policy)
+
+    before = (len(store.audit_events()), len(store.exceptions()), len(store.packs()))
+    first = line_export(store, "BL-Q1")
+    again = line_export(store, "BL-Q1")
+    after = (len(store.audit_events()), len(store.exceptions()), len(store.packs()))
+    body = first["export"]
+    resend_body = line_export(store, "BL-Q2")["export"]
+
+    store2 = InMemoryStore()
+    store2.upsert_receivable(_mini_policy("NSP-3001", D("1000.00"), broker_id=None))
+    store2.add_bank_line(BankLine(bank_line_id="BL-T1", value_date=date(2026, 9, 3),
+                                  amount=D("1000.00"), payer_name="Insured NSP-3001",
+                                  reference="NSP-3001", narrative=""))
+    r2 = run_day(store2, InMemoryObjectStore(), OfflineReader(), policy,
+                 date(2026, 9, 3), actor=ASSEMBLER)
+    gate.approve_pack(store2, r2["pack_id"], CONTROLLER, policy)
+    t1 = line_export(store2, "BL-T1")["export"]
+
+    return {
+        "rich_attempt_stages": [s["stage"] for s in body["attempts"][0]["stages"]],
+        "rich_allocations": len(body["allocations"]),
+        "rich_gate_edits": len(body["gate_history"][0]["edits"]),
+        "rich_return_id": body["return"]["return_id"],
+        "rich_resent_as": body["resend"]["resent_as"],
+        "resend_of": resend_body["resend"]["resend_of"],
+        "resend_return_link": resend_body["resend"]["resend_of_return_id"],
+        "rich_foots": body["footing"]["foots"],
+        "rich_accounted": body["footing"]["accounted"],
+        "digest_stable": first["sha256"] == again["sha256"],
+        "books_unchanged": before == after,
+        "t1_attempt_stages": [s["stage"] for s in t1["attempts"][0]["stages"]],
+        "t1_foots": t1["footing"]["foots"],
+        "t1_state": t1["final_state"]["state"],
+    }
+
+
 def score(rows: list[dict]) -> tuple[int, int, list[str]]:
     _ds, store, outcomes, reports, september_close, september_close_again = run_pipeline()
     packs = {p.pack_id: p for p in store.packs()}
@@ -846,6 +940,17 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 passed += 1
         elif row["kind"] == "import":
             observed = import_scenario()
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "line_export":
+            observed = line_export_scenario()
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()

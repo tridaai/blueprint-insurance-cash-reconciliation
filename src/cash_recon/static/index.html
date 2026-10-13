@@ -86,6 +86,13 @@
       <span class="note" id="return-status"></span>
     </div>
     <div id="returnsreport"></div>
+    <h3>Per-line audit export</h3>
+    <p class="note">The auditor's artifact for one bank line: the line as received (with its source and import batch), the tiers attempted in order, every allocation with its basis and any governed edit, every exception and re-match attempt, the gate history of the packs that carried it, returns and re-sends linked both ways, and a footing block that accounts for the line to the cent. Digested (SHA-256) and read-only — building it changes nothing.</p>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
+      <input type="text" id="audit-line" placeholder="Bank line id (e.g. BL-001)" size="18">
+      <button id="audit-go" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:#fff; color:var(--accent); cursor:pointer">Open audit export (text)</button>
+      <button id="audit-go-json" style="font:inherit; padding:7px 14px; border:1px solid var(--line); border-radius:8px; background:#fff; cursor:pointer">JSON</button>
+    </div>
     <h3>Exceptions raised this day</h3><div id="dayexceptions"></div>
   </section>
   <section id="tab-import" class="hidden">
@@ -361,6 +368,7 @@ async function loadExceptions() {
         <select id="asg-${r.exception_id}" style="font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px">${view.roster.map(n => `<option ${n === r.assignee ? "selected" : ""}>${n}</option>`).join("")}</select>
         <button onclick="assignExc('${r.exception_id}')" style="font:inherit; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer">Assign</button>
         <button onclick="noteExc('${r.exception_id}')" style="font:inherit; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer">Add note</button>
+        ${r.bank_line_id ? `<a href="/api/bank-lines/${encodeURIComponent(r.bank_line_id)}/audit-export/text" target="_blank" style="font:inherit; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; color:inherit; text-decoration:none; display:inline-block">Line audit ↗</a>` : ""}
       </td></tr>`).join("") + "</tbody></table>"
     : "<p class='note'>Nothing in the queue under these filters.</p>";
 }
@@ -391,7 +399,8 @@ async function loadSuspense() {
   const buckets = await api(`/api/suspense?as_of=${$("day").value}`);
   $("suspense").innerHTML = buckets.map(b => `<h3>${b.bucket} — ${money(b.total)} (${b.count})</h3>` +
     table([{key: "bank_line_id", label: "Bank line"}, {key: "amount", label: "Amount", num: 1, render: r => money(r.amount)},
-           {key: "received_date", label: "Received"}, {key: "age_days", label: "Age (days)", num: 1}, {key: "reason", label: "Reason"}], b.items)).join("");
+           {key: "received_date", label: "Received"}, {key: "age_days", label: "Age (days)", num: 1}, {key: "reason", label: "Reason"},
+           {label: "Audit", render: r => `<a href="/api/bank-lines/${encodeURIComponent(r.bank_line_id)}/audit-export/text" target="_blank">export ↗</a>`}], b.items)).join("");
 }
 async function runRematch() {
   const name = $("actor").value.trim();
@@ -579,6 +588,16 @@ async function loadAudit() {
 const loaders = {today: loadToday, report: loadReport, import: () => Promise.resolve(), close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
 $("wb-filter").addEventListener("click", () => loadExceptions().catch(e => setStatus(e.message)));
 $("return-go").addEventListener("click", recordReturn);
+$("audit-go").addEventListener("click", () => {
+  const id = $("audit-line").value.trim();
+  if (!id) return setStatus("Enter a bank line id for the audit export.");
+  window.open(`/api/bank-lines/${encodeURIComponent(id)}/audit-export/text`, "_blank");
+});
+$("audit-go-json").addEventListener("click", () => {
+  const id = $("audit-line").value.trim();
+  if (!id) return setStatus("Enter a bank line id for the audit export.");
+  window.open(`/api/bank-lines/${encodeURIComponent(id)}/audit-export`, "_blank");
+});
 $("cancel-go").addEventListener("click", recordCancellation);
 $("payout-assemble").addEventListener("click", assemblePayouts);
 $("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
