@@ -27,6 +27,8 @@ from cash_recon.models import (
     Allocation,
     AuditEvent,
     BankLine,
+    BrokerStatement,
+    BrokerStatementLine,
     Cancellation,
     DayClaim,
     ExceptionCode,
@@ -298,6 +300,29 @@ def battery(store, tag: str = "") -> None:
     assert store.reclaim_day(third, from_attempt=2) is False
     assert store.claim_day(third) is False
     assert store.day_claim(claim_day).attempt == 2
+
+    # Broker statements (migration 0007): saved under their digest
+    # id, read back whole with Decimal fidelity, filtered by broker
+    # and period, and a supersession mark saved back on the record.
+    stmt = BrokerStatement(
+        statement_id=f"BSTMT-BATTERY{tag}" if tag else "BSTMT-BATTERY",
+        broker_id="BRK-ALDER", period="2026-10",
+        source_name="battery", control_total=D("100.00"), control_count=1,
+        lines=[BrokerStatementLine(
+            policy_number="NSP-1001", gross=D("110.00"),
+            commission=D("10.00"), net=D("100.00"), reference="BAT-1")],
+    )
+    store.save_broker_statement(stmt)
+    back = store.broker_statement(stmt.statement_id)
+    assert back is not None and back.net_total == D("100.00")
+    assert isinstance(back.lines[0].gross, Decimal)
+    assert [s.statement_id for s in store.broker_statements(
+        broker_id="BRK-ALDER", period="2026-10")] == [stmt.statement_id]
+    assert store.broker_statements(broker_id="BRK-ALDER", period="2026-11") == []
+    assert store.broker_statement("BSTMT-NOPE") is None
+    back.superseded_by = "BSTMT-NEWER"
+    store.save_broker_statement(back)
+    assert store.broker_statement(stmt.statement_id).superseded_by == "BSTMT-NEWER"
 
 
 def test_conformance_in_memory():
