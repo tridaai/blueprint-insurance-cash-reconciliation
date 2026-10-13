@@ -20,6 +20,7 @@ The graph stops at the gate. Approval is a separate human act.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timezone
 from typing import TypedDict
@@ -245,6 +246,14 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
                                           f"netted={outcome.offset_total}, "
                                           f"suspense={outcome.suspense_amount}, "
                                           f"exceptions={[e.code.value for e in outcome.exceptions]}"))
+            if outcome.attempts:
+                # The ladder as climbed, persisted with the outcome:
+                # the per-line audit export reads these back, so a
+                # line shows the tiers attempted, not just the tier
+                # that settled.
+                store.audit(AuditEvent(at=_now(), actor="matcher", action="line_attempts",
+                                       subject=line.bank_line_id,
+                                       detail=json.dumps(outcome.attempts)))
             if outcome.resend_of:
                 line.resend_of = outcome.resend_of
                 store.save_bank_line(line)

@@ -83,6 +83,16 @@ class LineOutcome(BaseModel):
     proposed_by: str | None = None
     resend_of: str | None = None  # a returned line this payment re-sends
     notes: list[str] = []
+    # The ladder as it was actually climbed: one entry per stage
+    # attempted, in order, with its outcome — recorded by the
+    # matcher as it decides, and persisted to the audit trail by
+    # the callers, so a line's export can show the tiers attempted
+    # rather than only the tier that settled. Entries are plain
+    # dicts: {"stage", "result", "detail"}.
+    attempts: list[dict] = []
+
+    def record_attempt(self, stage: str, result: str, detail: str = "") -> None:
+        self.attempts.append({"stage": stage, "result": result, "detail": detail})
 
     @property
     def allocated_total(self) -> Decimal:
@@ -196,6 +206,10 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
             "payment was returned by the bank, so this line is matched on "
             "its own merits, not held as a duplicate."
         )
+        outcome.record_attempt(
+            "RESEND_LINK", "linked",
+            f"This payment re-sends returned line {resend.bank_line_id}; "
+            "the link is recorded and the line is matched on its own merits.")
 
     # -- remittance-led (T4): the day's advice from this broker ----------
     if broker is not None and line.reference is None:
@@ -208,10 +222,18 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
                 # names its proposer.
                 outcome.proposed_by = getattr(ctx.proposer, "name", None)
             return outcome
+        outcome.record_attempt(
+            "T4_REMITTANCE", "not_applicable",
+            f"No remittance advice from {broker.name} pairs with this line.")
 
     # -- duplicate check, in code, before any tier -------------------------
     dup = _find_duplicate(line, ctx)
     if dup is not None:
+        outcome.record_attempt(
+            "DUPLICATE_CHECK", "raised",
+            f"DUPLICATE_PAYMENT: same payer, amount and near date as "
+            f"{dup.bank_line_id} ({dup.value_date}), which already "
+            "produced allocations.")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.DUPLICATE_PAYMENT, line.amount,
                  f"Same payer and amount as {dup.bank_line_id} "
@@ -221,6 +243,9 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
         )
         outcome.suspense_amount = line.amount
         return _finish(line, outcome)
+    outcome.record_attempt(
+        "DUPLICATE_CHECK", "passed",
+        "No settled prior line shares this payer, amount and a near date.")
 
     # -- reference-led -------------------------------------------------------
     ref = _reference_of(line)
@@ -230,7 +255,14 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
         rec = _policy_for_payer(line, ctx)
         if rec is not None:
             outcome.notes.append("Attributed to a policy by payer name.")
+            outcome.record_attempt(
+                "PAYER_ATTRIBUTION", "attributed",
+                f"The payer name matches insured {rec.insured_name} "
+                f"({rec.policy_number}) exactly.")
     if ref and rec is None:
+        outcome.record_attempt(
+            "REFERENCE_LOOKUP", "raised",
+            f"UNKNOWN_POLICY: reference {ref} is not a policy on the books.")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.UNKNOWN_POLICY, line.amount,
                  f"Reference {ref} is not a policy on the books. Held in suspense.",
@@ -245,14 +277,15 @@ def match_line(line: BankLine, ctx: MatchContext) -> LineOutcome:
 
     # -- lump-sum proposal (broker payer, no reference, no advice) ---------
     if broker is not None:
-        proposal = _propose_lump_sum(line, broker, ctx)
+        proposal = _propose_lump_sum(line, broker, ctx, outcome)
         if proposal is not None:
-            proposal.resend_of = outcome.resend_of
-            if outcome.resend_of:
-                proposal.notes = [*outcome.notes, *proposal.notes]
             return proposal
 
     # -- T5: unidentified ------------------------------------------------------
+    outcome.record_attempt(
+        "T5_UNIDENTIFIED", "raised",
+        "UNIDENTIFIED: no policy reference, no remittance advice, and "
+        "no defensible allocation proposal.")
     outcome.exceptions.append(
         _exc(line, ExceptionCode.UNIDENTIFIED, line.amount,
              "No policy reference, no remittance advice, and no defensible "
@@ -401,6 +434,12 @@ def _net_against_payable(line, rec: Receivable, amount: Decimal, ctx, outcome) -
     outcome.offsets.append(PayableOffset(
         bank_line_id=line.bank_line_id, payable_id=payable.payable_id,
         policy_number=rec.policy_number, amount=offset))
+    outcome.record_attempt(
+        "PAYABLE_NETTING", "netted",
+        f"{offset} netted against return-premium payable {payable.payable_id} "
+        f"on cancelled policy {rec.policy_number} (owed to the "
+        f"{payable.payee_kind}, {payable.payee_name}); it lands when the "
+        "pack carrying this line is approved.")
     outcome.notes.append(
         f"Netted {offset} against return-premium payable {payable.payable_id} "
         f"(owed to the {payable.payee_kind}, {payable.payee_name}); the payable "
@@ -415,6 +454,10 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
     if rec.status == PolicyStatus.CANCELLED:
         remainder = _net_against_payable(line, rec, line.amount, ctx, outcome)
         if remainder > ZERO:
+            outcome.record_attempt(
+                "REFERENCE_MATCH", "raised",
+                f"CANCELLED_POLICY: policy {rec.policy_number} was cancelled "
+                f"before this cash arrived; {remainder} is held in suspense.")
             outcome.exceptions.append(
                 _exc(line, ExceptionCode.CANCELLED_POLICY, remainder,
                      f"Policy {rec.policy_number} was cancelled before this cash "
@@ -422,10 +465,19 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
                      policy_number=rec.policy_number, broker_id=rec.broker_id)
             )
             outcome.suspense_amount = remainder
+        else:
+            outcome.record_attempt(
+                "REFERENCE_MATCH", "settled",
+                f"Cash for cancelled policy {rec.policy_number} met its "
+                "return-premium payable in full.")
         return _finish(line, outcome)
 
     insts = rec.open_installments()
     if not insts:
+        outcome.record_attempt(
+            "REFERENCE_MATCH", "raised",
+            f"OVERPAID: policy {rec.policy_number} has no open balance; "
+            "the whole line is held in suspense.")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.OVERPAID, line.amount,
                  f"Policy {rec.policy_number} has no open balance. "
@@ -445,20 +497,55 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
     # for payments whose reference names no installment.
     named = _named_installment(line, rec)
     if named is not None and named.open_balance > 0:
-        return _match_named(line, rec, named, ctx, outcome)
+        outcome = _match_named(line, rec, named, ctx, outcome)
+        result = (
+            "settled" if not outcome.exceptions
+            else "settled_with_exceptions" if outcome.allocations
+            else "raised"
+        )
+        outcome.record_attempt(
+            outcome.tier.value if outcome.tier else "T3_REFERENCE", result,
+            f"The reference names installment {named.installment_id} of "
+            f"{rec.policy_number}; it was settled first, per the "
+            "named-installment rule."
+            + (f" Exceptions: {[e.code.value for e in outcome.exceptions]}."
+               if outcome.exceptions else ""))
+        return outcome
 
     # T1: exact against the next installment or the full balance, gross basis
     if amount == next_gross or amount == full_gross:
         dues = gross if amount == next_gross else gross
         allocs, _ = _distribute(line, rec, amount, dues, Tier.T1_EXACT)
         outcome.allocations, outcome.tier = allocs, Tier.T1_EXACT
+        scope = "next installment" if amount == next_gross else "full open balance"
+        outcome.record_attempt(
+            "T1_EXACT", "settled",
+            f"Amount equals the {scope} due of {rec.policy_number}, gross basis.")
         return _finish(line, outcome)
+    outcome.record_attempt(
+        "T1_EXACT", "no_match",
+        f"{amount} equals neither the next installment due {next_gross} "
+        f"nor the full open balance {full_gross} of {rec.policy_number} (gross).")
 
     # T2: netting-exact on the same scopes
     if policy_broker is not None and (amount == next_cash or amount == full_cash):
         allocs, _ = _distribute(line, rec, amount, cash, Tier.T2_NETTING)
         outcome.allocations, outcome.tier = allocs, Tier.T2_NETTING
+        scope = "next installment" if amount == next_cash else "full open balance"
+        outcome.record_attempt(
+            "T2_NETTING", "settled",
+            f"Amount equals the {scope} due of {rec.policy_number} net of "
+            f"commission at the rate in force on {line.value_date}.")
         return _finish(line, outcome)
+    if policy_broker is not None:
+        outcome.record_attempt(
+            "T2_NETTING", "no_match",
+            f"{amount} equals neither the next installment net due {next_cash} "
+            f"nor the full net balance {full_cash} of {rec.policy_number}.")
+    else:
+        outcome.record_attempt(
+            "T2_NETTING", "not_applicable",
+            f"{rec.policy_number} is direct-billed: no commission to net.")
 
     # T3: an exact run of consecutive installments (combined payment)
     for basis, label in ((cash, "net"), (gross, "gross")):
@@ -469,6 +556,10 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
                 allocs, _ = _distribute(line, rec, amount, basis, Tier.T3_REFERENCE,
                                         note=f"Combined payment: {k} installments, {label} basis.")
                 outcome.allocations, outcome.tier = allocs, Tier.T3_REFERENCE
+                outcome.record_attempt(
+                    "T3_REFERENCE", "settled",
+                    f"Combined payment: an exact run of {k} consecutive "
+                    f"installments of {rec.policy_number}, {label} basis.")
                 return _finish(line, outcome)
 
     # Overpaid against the whole policy
@@ -476,6 +567,10 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
         allocs, _ = _distribute(line, rec, full_gross, gross, Tier.T3_REFERENCE)
         excess = amount - full_gross
         outcome.allocations, outcome.tier = allocs, Tier.T3_REFERENCE
+        outcome.record_attempt(
+            "T3_REFERENCE", "settled_with_exceptions",
+            f"OVERPAID: the open balance of {rec.policy_number} ({full_gross}) "
+            f"was settled gross; the excess {excess} is held in suspense.")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.OVERPAID, excess,
                  f"Payment exceeds the open balance of {rec.policy_number} by {excess}. "
@@ -489,6 +584,11 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
         allocs, _ = _distribute(line, rec, next_cash, cash, Tier.T3_REFERENCE)
         excess = amount - next_cash
         outcome.allocations, outcome.tier = allocs, Tier.T3_REFERENCE
+        outcome.record_attempt(
+            "T3_REFERENCE", "settled_with_exceptions",
+            f"OVERPAID: the next installment of {rec.policy_number} was "
+            f"settled at its cash due {next_cash}; the excess {excess} "
+            "is held in suspense.")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.OVERPAID, excess,
                  f"Payment exceeds the amount due on the next installment of "
@@ -505,6 +605,11 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
             contracted = policy_broker.rate_on(line.value_date)
             clean_rate = (implied * 1000) == (implied * 1000).to_integral_value()
             if clean_rate and implied != contracted:
+                outcome.record_attempt(
+                    "T3_REFERENCE", "raised",
+                    f"NETTING_MISMATCH: the payment implies a {implied:.1%} "
+                    f"deduction, a clean rate that is not the contracted "
+                    f"{contracted:.1%}; the cash is held unapplied.")
                 outcome.exceptions.append(
                     _exc(line, ExceptionCode.NETTING_MISMATCH, next_cash - amount,
                          f"{policy_broker.name} remitted {amount} against {rec.policy_number}: "
@@ -517,6 +622,11 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
                 return _finish(line, outcome)
         allocs, _ = _distribute(line, rec, amount, cash, Tier.T3_REFERENCE)
         outcome.allocations, outcome.tier = allocs, Tier.T3_REFERENCE
+        outcome.record_attempt(
+            "T3_REFERENCE", "settled_with_exceptions",
+            f"PARTIAL: {amount} applied against the next installment of "
+            f"{rec.policy_number}; {next_cash - amount} short of its cash "
+            "due, and the balance stays open and collectable.")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.PARTIAL, next_cash - amount,
                  f"Payment is {next_cash - amount} short of the amount due on "
@@ -535,6 +645,11 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
                                    note="Applied across open installments, oldest open first.")
     outcome.allocations, outcome.tier = allocs, Tier.T3_REFERENCE
     if leftover > ZERO:
+        outcome.record_attempt(
+            "T3_REFERENCE", "settled_with_exceptions",
+            f"Applied across the open installments of {rec.policy_number} "
+            f"oldest first; the leftover {leftover} exceeds the amount "
+            "due at the rate in force and is held in suspense (OVERPAID).")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.OVERPAID, leftover,
                  f"Payment exceeds the amount due on {rec.policy_number} by {leftover} "
@@ -542,6 +657,11 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
                  policy_number=rec.policy_number, broker_id=rec.broker_id)
         )
         outcome.suspense_amount = leftover
+    else:
+        outcome.record_attempt(
+            "T3_REFERENCE", "settled",
+            f"Applied across the open installments of {rec.policy_number}, "
+            "oldest open first, on the cash basis.")
     return _finish(line, outcome)
 
 
@@ -656,6 +776,12 @@ def _match_remittance(line, rem: Remittance, ctx, outcome) -> LineOutcome:
     if lines_total != line.amount:
         problems.append(f"its lines sum to {lines_total} but the wire was {line.amount}")
     if problems:
+        outcome.record_attempt(
+            "T4_REMITTANCE", "refused",
+            f"Remittance {rem.remittance_id} does not foot: "
+            + "; ".join(problems)
+            + ". Nothing allocated; the wire is held in suspense "
+            "(REMITTANCE_ARITHMETIC).")
         outcome.exceptions.append(
             _exc(line, ExceptionCode.REMITTANCE_ARITHMETIC, abs(lines_total - line.amount),
                  f"Remittance {rem.remittance_id} does not foot: " + "; ".join(problems) +
@@ -720,10 +846,25 @@ def _match_remittance(line, rem: Remittance, ctx, outcome) -> LineOutcome:
             )
     if outcome.allocations:
         outcome.tier = Tier.T4_REMITTANCE
+    codes = [e.code.value for e in outcome.exceptions]
+    if outcome.allocations and outcome.suspense_amount == ZERO and not outcome.exceptions:
+        t4_result = "settled"
+    elif outcome.allocations:
+        t4_result = "settled_with_exceptions"
+    elif outcome.offsets:
+        t4_result = "settled_by_netting"
+    else:
+        t4_result = "raised"
+    outcome.record_attempt(
+        "T4_REMITTANCE", t4_result,
+        f"Remittance {rem.remittance_id} ({len(rem.lines)} advice line(s)): "
+        f"allocated {outcome.allocated_total}, netted {outcome.offset_total}, "
+        f"suspense {outcome.suspense_amount}"
+        + (f"; exceptions: {codes}." if codes else "."))
     return _finish(line, outcome)
 
 
-def _propose_lump_sum(line, broker, ctx) -> LineOutcome | None:
+def _propose_lump_sum(line, broker, ctx, outcome: LineOutcome) -> LineOutcome | None:
     candidates: list[Candidate] = []
     for rec in sorted(ctx.receivables.values(), key=lambda r: r.policy_number):
         if rec.broker_id != broker.broker_id or rec.status == PolicyStatus.CANCELLED:
@@ -733,9 +874,16 @@ def _propose_lump_sum(line, broker, ctx) -> LineOutcome | None:
                                         installment_id=inst.installment_id,
                                         cash_due=cash_due(rec, inst, ctx.brokers, line.value_date)))
     if not candidates:
+        outcome.record_attempt(
+            "LUMP_SUM_PROPOSAL", "not_applicable",
+            f"{broker.name} has no open items to propose against.")
         return None
     proposal = ctx.proposer.propose_lump_sum(line.amount, line.payer_name, candidates)
     if proposal is None:
+        outcome.record_attempt(
+            "LUMP_SUM_PROPOSAL", "no_proposal",
+            f"No allocation of {broker.name}'s open items foots to the "
+            "wire; nothing defensible to propose.")
         return None
     # One broker's wire settles that broker's book. A proposal
     # naming another broker's open item is refused whole, whoever
@@ -745,8 +893,16 @@ def _propose_lump_sum(line, broker, ctx) -> LineOutcome | None:
     for cand in proposal.allocations:
         named = ctx.receivables.get(cand.policy_number)
         if named is None or named.broker_id != broker.broker_id:
+            outcome.record_attempt(
+                "LUMP_SUM_PROPOSAL", "refused",
+                f"The proposal named {cand.policy_number}, which is not "
+                f"on {broker.name}'s book; a lump sum never crosses "
+                "brokers, so the proposal was refused whole.")
             return None
-    outcome = LineOutcome(bank_line_id=line.bank_line_id, proposed_by=proposal.backend)
+    outcome.proposed_by = proposal.backend
+    outcome.record_attempt(
+        "LUMP_SUM_PROPOSAL", "proposed",
+        f"Proposal by {proposal.backend}: {proposal.reasoning}")
     for cand in proposal.allocations:
         outcome.allocations.append(
             Allocation(bank_line_id=line.bank_line_id, policy_number=cand.policy_number,

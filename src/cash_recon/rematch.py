@@ -23,6 +23,7 @@ recoveries as their own line.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, time, timezone
 
@@ -122,6 +123,13 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         line = lines[item.bank_line_id]
         start_amount = item.amount
         outcome = match_line(line, ctx)
+        if outcome.attempts:
+            # The re-match's ladder joins the line's own trail, so
+            # the audit export shows every working of the line, the
+            # day run's and each re-match's alike.
+            store.audit(AuditEvent(at=stamp, actor=actor, action="line_attempts",
+                                   subject=line.bank_line_id,
+                                   detail=json.dumps(outcome.attempts)))
         if outcome.allocations:
             ctx.settled_line_ids.add(line.bank_line_id)
 
