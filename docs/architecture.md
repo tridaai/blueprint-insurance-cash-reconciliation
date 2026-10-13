@@ -291,6 +291,64 @@ only when it carries a policy number — otherwise it would break the
 matcher's "no reference" signal for remittance-led lines, and the
 policy reference is found in the description text as usual.
 
+**Attempts are recorded, not reconstructed.** An auditor asking
+"what did you try on this line, in what order?" cannot be answered
+from outcomes alone — the outcome keeps only the tier that
+settled. So the matcher records its ladder as it climbs it: every
+stage attempted, in true execution order, with its result and the
+reason, persisted per line as a `line_attempts` audit event (the
+re-match pass records its own workings the same way, under the
+re-match actor). Lines also carry their provenance on the record
+itself — `source` (dataset, statement import, or manual) and, for
+imports, the batch id, a digest of the statement text — instead of
+leaving origin to be inferred from an id prefix. Lines worked
+before recording landed have no ladder, and their exports say so
+rather than wearing an invented one.
+
+**The per-line audit export foots inside itself.** The export
+(`line_export.py`) is a read model over the line's whole chain —
+the record as received, the recorded attempts, allocations with
+their basis and gate edits, exceptions with their handling acts,
+re-match attempts, gate history (assembler, edits with
+before/after, approvals, rejection reasons), returns and
+re-sends linked both ways, and a final-state verdict. Its footing
+block states the identity in its own terms — posted allocations,
+less what a return reversed, plus allocations still at the gate,
+payable offsets, open suspense, and the returned amount, against
+the line amount — and either confirms the line foots or names
+the difference; rejected-pack allocations are reported as their
+own term, never silently inside or outside the identity. The
+body is canonical and wall-clock-free under the close pack's
+digest discipline (SHA-256 over the sorted, compact body;
+generated-at stays outside it), and building an export writes
+nothing — a test pins the books identical before and after.
+
+**The trend watch names deteriorations only.** The trend
+(`trends.py`) re-aggregates the day reports' and close packs'
+own records by month — bank and allocated values are the sums
+of the days', suspense received is the close pack's
+reconstruction — so its figures foot to the reports they
+summarise by construction, and the eval gate pins both
+synthetic months against the live reports. The watch on top is
+a pure function of the month rows and the tolerances in
+`config.WatchPolicy`: an auto-rate drop beyond the line, an
+exception code's share of bank value doubling (with a floor, so
+a doubling from nearly nothing is not a finding), dwell rising
+beyond the line. Anything else is reported as *within
+tolerance*, explicitly, with the movement figures — a watch
+that only speaks when it alarms teaches its readers to treat
+silence as health, which is the one thing silence cannot prove.
+
+**Webhooks are notifications, never control flow.** Gate acts
+emit small events (`webhooks.py`) to `CASH_RECON_WEBHOOK_URL`
+— kind, id, actor, totals, nothing internal — through a
+bounded-timeout standard-library POST with exactly one retry.
+A failed delivery is audited as `webhook_failed` with the error
+class and nothing more: the failure is on the record, and the
+act it reported stands regardless. Readiness reports the
+webhook state (configured or disabled) so an operator can tell
+"no receiver" from "receiver down" without reading the trail.
+
 ## Stores
 
 - **PostgreSQL** (production): one table per record type, payloads as
@@ -334,7 +392,13 @@ policy reference is found in the description text as usual.
 Policy thresholds live in `config.py` and the environment:
 `AUTO_APPLY_THRESHOLD` (500.00), `WRITE_OFF_SINGLE_LIMIT` (250.00),
 `STALE_SUSPENSE_DAYS` (30), `NETTING_TOLERANCE` (0.01),
-`DUPLICATE_WINDOW_DAYS` (5). Provider selection is `LLM_BACKEND`
+`DUPLICATE_WINDOW_DAYS` (5). The trend watch's tolerances live in
+the same module (`WatchPolicy`): `WATCH_AUTO_RATE_DROP_POINTS`
+(0.05), `WATCH_EXCEPTION_SHARE_DOUBLING_FACTOR` (2),
+`WATCH_EXCEPTION_SHARE_FLOOR` (0.01),
+`WATCH_SUSPENSE_DWELL_RISE_DAYS` (2). Gate webhooks are one
+variable: `CASH_RECON_WEBHOOK_URL` (unset disables them).
+Provider selection is `LLM_BACKEND`
 (`auto` default) plus the provider variables in `.env.example`.
 Store selection is `DATABASE_URL` (PostgreSQL) or `SQLITE_PATH`
 (SQLite file, default `data/cashrecon.db`) — an env change only.

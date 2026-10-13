@@ -396,6 +396,67 @@ the days' by-broker splits. The query notes drafted for a broker's
 mismatches hang off their row — view only. It scores brokers'
 paperwork, never people, and it sends nothing.
 
+## The per-line audit export
+
+For any bank line, one artifact traces every cent and every act
+(console Day report tab, `GET /api/bank-lines/{id}/audit-export`
+and `/text`, `cash-recon audit-export`): the line as received —
+its source (dataset, statement import, or manual) with the import
+batch id where it has one; the tiers attempted and their outcomes
+in order, recorded by the matcher as it climbed the ladder, not
+reconstructed afterwards; every allocation with its basis (gross
+or net of commission, the installment it settled, its tier or its
+proposal kind and proposer) and every governed edit with
+before/after figures; every exception raised against the line
+with its handling chain; re-match attempts; the gate history of
+every pack that carried it — assembler, edits, approvals,
+rejections with reasons; a return and its re-sends linked both
+ways; and the line's current final state. A footing block inside
+the export accounts for the line — allocations posted and at the
+gate, payable offsets, open suspense, reversals, the returned
+amount — and either says the line foots to the cent or says so,
+with the difference. Like the close pack, the body is canonical
+and wall-clock-free under a SHA-256 digest, so regeneration from
+the same books is byte-identical; and building it changes
+nothing — a test pins the books identical before and after. Lines
+worked before attempt recording landed say so in their export
+rather than wearing an invented ladder.
+
+## The match-quality trend watch
+
+Across the months on the books (console Month close tab,
+`GET /api/trends`, `cash-recon trends`): per month, the
+auto-applied rate — the share of bank value settled with no human
+touch beyond the gate — the tier mix by value, the exception mix
+by code and value share, average suspense dwell for resolved
+items, the re-match recovery rate, and the return rate, with
+month-over-month deltas computed in code. The figures are the day
+reports' and close packs' own numbers re-aggregated — the
+month's bank and allocated values are the sums of its days', and
+suspense received is the close pack's reconstruction — so the
+trend foots to the reports it summarises, and tests pin it on
+both synthetic months. On top of the trend sits a watch with its
+tolerances in `config.py` beside the policy thresholds: it names
+deteriorations only — the auto-applied rate dropping more than
+five points, an exception code's share of bank value doubling,
+average dwell rising more than two days — each with its figures.
+When nothing crosses a line, the watch says **within tolerance**,
+with the movement figures, rather than staying silent.
+
+## Gate webhooks
+
+When a pack is assembled, approved, or rejected — posting packs,
+re-match packs, and payout packs alike — or a return is recorded,
+a small JSON event (kind, pack or line id, actor, totals; no
+internal paths) is POSTed to the URL in `CASH_RECON_WEBHOOK_URL`.
+Unset means disabled, and `/readiness` reports which state the
+service is in. Delivery is fire-and-forget from the gate's
+perspective: a bounded-timeout standard-library POST, one retry,
+then it stops — a delivery that still fails is written to the
+audit trail as `webhook_failed` with the error class, and the
+gate act stands either way. The gate never waits on a downstream
+system being awake.
+
 ## Guardrails, as code
 
 - Remittance and bank text is **untrusted**. Instruction-like text
@@ -414,7 +475,7 @@ paperwork, never people, and it sends nothing.
 ## Evals
 
 `make evals` runs the synthetic months through the real pipeline and
-scores 52 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 54 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
@@ -440,7 +501,13 @@ from its own state of the books, so a change to September's close
 fails October's golden), and the return-premium cases (pro-rata to
 the cent, payable to broker vs insured, netting on the day report,
 payout self-approval refused, the second-approver rule, and a
-December payable ledger that foots on its own identity). The runner prints a
+December payable ledger that foots on its own identity), the audit-export
+case (a rich line — edited proposal, return, re-send — exports
+completely, foots, regenerates byte-identically, and changes
+nothing; a plain T1 line exports minimally but completely), and
+the trend case (both months' bank and allocated values foot to
+the day reports, suspense received agrees with both close packs,
+and the watch compares the two months by name). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
@@ -453,7 +520,7 @@ into the set first, then the behaviour changes.
 src/cash_recon/
   models.py      the records: brokers, receivables, bank lines, packs
   money.py       Decimal money, the one rounding point
-  config.py      policy thresholds (auto-apply, write-off limit, stale age)
+  config.py      policy thresholds (auto-apply, write-off limit, stale age) + the trend watch's tolerances
   dataset.py     the synthetic Northgate months (September + October), gold by construction
   matcher.py     the five tiers, in code, with the footing assertion
   llm.py         the model port: reader, proposer, note drafter
@@ -466,6 +533,9 @@ src/cash_recon/
   workbench.py   the exception workbench: assignment, handling notes, the queue view
   report.py      the daily reconciliation report, suspense aging, the broker scorecard, proposal quality
   close_pack.py  the month-end close pack: control roll, digest, JSON + text export
+  line_export.py the per-line audit export: attempts, allocations, gate history, footing, digest
+  trends.py      the match-quality trend watch: per-month figures, deltas, named deteriorations
+  webhooks.py    gate webhooks: fire-and-forget events, one retry, failures audited
   statement.py   the bank statement importer: generic CSV in, bank lines out
   pipeline.py    the day run as a LangGraph graph
   rematch.py     the suspense re-match pass: late information, same tiers, same gate
@@ -480,8 +550,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 133 tests,
-52/52 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 155 tests,
+54/54 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, and the offline fallback is what the demo and the
