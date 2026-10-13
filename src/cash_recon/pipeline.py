@@ -22,6 +22,12 @@
 - **report**: the daily reconciliation report, footing checked.
 
 The graph stops at the gate. Approval is a separate human act.
+
+The run itself is lifecycle-guarded (see `run_day`): a day runs
+once, a second run of a run day refuses in words on the audit
+trail, and the one sanctioned second run is the recovery of an
+attempt that died mid-run — stamped interrupted, its partial work
+superseded, its handling state preserved.
 """
 
 from __future__ import annotations
@@ -439,13 +445,202 @@ def _expected_net(ctx: MatchContext, exc: ExceptionRecord):
     return cash_due(rec, insts[0], ctx.brokers, exc.first_seen)
 
 
+class DayRunError(RuntimeError):
+    """A day run was refused. The message says why, in words."""
+
+
+def _run_events(store: Store, day: date) -> list[AuditEvent]:
+    """The day's run-lifecycle record: the day_run_* audit events
+    whose subject is the day itself, in trail order."""
+    return [
+        e for e in store.audit_events()
+        if e.subject == day.isoformat() and e.action.startswith("day_run_")
+    ]
+
+
+def _refuse_run(store: Store, day: date, actor: str, reason: str) -> None:
+    """Record the refusal on the audit trail, then raise it. A
+    refused run changes nothing else: the refusal event is the one
+    trace it leaves, so 'we tried to run it twice' is itself on the
+    record."""
+    store.audit(AuditEvent(at=_now(), actor=actor, action="day_run_refused",
+                           subject=day.isoformat(), detail=reason))
+    raise DayRunError(reason)
+
+
+def _preserved_handling(store: Store, day: date) -> dict:
+    """The handling state a recovery run must not destroy: for the
+    day's lines' exceptions, their status, assignee and notes. The
+    persist node regenerates an exception record wholesale, and the
+    SQL stores' upsert would otherwise reset a resolved exception
+    to open and wipe the workbench's assignment and notes — handling
+    a crashed attempt's queue between the crash and the recovery is
+    legitimate desk work, and the recovery has no business undoing
+    it. The regenerated record's code, amount and detail stand; only
+    the handling state is carried over."""
+    line_ids = {l.bank_line_id for l in store.bank_lines(on=day)}
+    return {
+        exc.exception_id: (exc.status, exc.assignee, list(exc.handling_notes))
+        for exc in store.exceptions()
+        if exc.bank_line_id in line_ids
+    }
+
+
+def _restore_handling(store: Store, kept: dict) -> None:
+    if not kept:
+        return
+    current = {e.exception_id: e for e in store.exceptions()}
+    for exc_id, (status, assignee, notes) in kept.items():
+        exc = current.get(exc_id)
+        if exc is None:
+            continue
+        if (exc.status, exc.assignee, exc.handling_notes) != (status, assignee, notes):
+            exc.status, exc.assignee, exc.handling_notes = status, assignee, list(notes)
+            store.update_exception(exc)
+
+
 def run_day(store: Store, objects: ObjectStore, reader, policy: PolicyConfig,
             day: date, actor: str = "cash-team") -> dict:
+    """Run one day, once.
+
+    A day run is not idempotent by accident of the stores — left to
+    itself a second run overwrites the day's pack in place (an
+    approved pack reverts to proposed on the record, a rejection is
+    erased), regenerates the day's exceptions over whatever the
+    workbench has done with them, and writes the whole attempt into
+    the audit trail a second time. So the run guards itself, on the
+    audit trail's own run record (day_run_started / day_run_completed
+    events, subject = the day):
+
+    - A day whose pack stands DECIDED (approved or rejected) refuses
+      a second run, in words, naming the pack and its status. The
+      check reads the pack itself, so books written before run
+      records existed are guarded too. Rejected work is re-worked
+      through the re-match pass, never by re-running the day.
+    - A day that ran to completion refuses likewise — its proposed
+      pack is waiting at the gate, and a day with no pack (every
+      line non-premium, or no lines at all) is still run.
+    - The one legitimate second run is a RECOVERY: a prior attempt
+      started and never completed (the process died mid-run), or —
+      on books that predate run records — a proposed pack stands
+      with no completion behind it. The recovery stamps the orphan
+      attempt as interrupted on the trail, cleanses the dead
+      attempt's allocation-index rows for the day's still-proposed
+      packs (the one write that is not naturally overwritten in
+      place), preserves the workbench's handling state on the day's
+      exceptions across the re-persist, and runs the day fresh on
+      its own checkpoint thread. Approval remains the only applier
+      throughout: an interrupted run has applied nothing, because
+      applying is not the run's to do.
+    """
+    pack = store.pack(f"PACK-{day.isoformat()}")
+    npack = store.pack(f"NPACK-{day.isoformat()}")
+    events = _run_events(store, day)
+    started = [e for e in events if e.action == "day_run_started"]
+    # The run's standing is read off the ORDER of the trail, not the
+    # counts: a recovery writes its own started/completed pair on
+    # top of the orphan attempt's lone started, so counting would
+    # call a recovered day interrupted forever. The day is complete
+    # when its last started attempt is followed by a completion, and
+    # orphaned when a started attempt is the last word.
+    last_started = max(
+        (i for i, e in enumerate(events) if e.action == "day_run_started"),
+        default=None)
+    last_completed = max(
+        (i for i, e in enumerate(events) if e.action == "day_run_completed"),
+        default=None)
+    run_completed = last_completed is not None and (
+        last_started is None or last_completed > last_started)
+    run_orphaned = last_started is not None and not run_completed
+
+    decided = next(
+        (p for p in (pack, npack) if p is not None and p.status.value != "proposed"),
+        None,
+    )
+    if decided is not None:
+        _refuse_run(store, day, actor,
+                    f"day {day.isoformat()} already ran: pack {decided.pack_id} is "
+                    f"{decided.status.value}. A day runs once — the pack stands as "
+                    "decided, and re-working the day's cash goes through the "
+                    "re-match pass, not a second run.")
+
+    recovery = False
+    orphan_note = ""
+    if run_completed:
+        standing = pack if pack is not None else npack
+        if standing is not None:
+            _refuse_run(store, day, actor,
+                        f"day {day.isoformat()} already ran: pack {standing.pack_id} is "
+                        f"{standing.status.value} and waiting at the gate. A day runs "
+                        "once — decide the pack there, or reject it and re-work the "
+                        "cash through the re-match pass.")
+        _refuse_run(store, day, actor,
+                    f"day {day.isoformat()} already ran to completion and assembled "
+                    "no pack. A day runs once.")
+    elif run_orphaned:
+        recovery = True
+        orphan = started[-1]
+        orphan_note = (f"attempt {len(started)} (started {orphan.at.isoformat()} by "
+                       f"{orphan.actor}) never completed")
+    elif not started and (pack is not None or npack is not None):
+        # Books that predate run records: a pack stands for the day
+        # with no run behind it on the trail. Treat the attempt as
+        # interrupted and recover it the same way — the re-derived
+        # pack overwrites the standing one in place, identically,
+        # because approval (the only mover of the books it prices
+        # from) has not touched them.
+        recovery = True
+        orphan_note = "a pack stands for the day with no run record behind it"
+
+    attempt = len(started) + 1
+    thread_id = f"day-{day.isoformat()}-a{attempt}"
+    kept: dict = {}
+    if recovery:
+        store.audit(AuditEvent(
+            at=_now(), actor=actor, action="day_run_interrupted",
+            subject=day.isoformat(),
+            detail=f"the day's earlier attempt is marked interrupted: {orphan_note}. "
+                   f"Its partial work is superseded by attempt {attempt}; nothing it "
+                   "wrote was applied, because approval is the only applier."))
+        kept = _preserved_handling(store, day)
+        for standing in store.packs(on=day):
+            if standing.status.value == "proposed" and (
+                standing.pack_id == f"PACK-{day.isoformat()}"
+                or standing.pack_id.startswith(f"PACK-COMB-{day.isoformat()}")
+            ):
+                store.replace_allocations([], standing.pack_id)
+    store.audit(AuditEvent(
+        at=_now(), actor=actor, action="day_run_started", subject=day.isoformat(),
+        detail=f"attempt {attempt} on thread {thread_id}"
+               + ("; recovery of an interrupted attempt" if recovery else "")))
+
     app = build_graph(store, objects, reader, policy)
     result = app.invoke(
         {"day": day.isoformat(), "actor": actor},
-        config={"configurable": {"thread_id": f"day-{day.isoformat()}"}},
+        config={"configurable": {"thread_id": thread_id}},
     )
+    if recovery:
+        _restore_handling(store, kept)
+        # The combination pass leaves a standing PACK-COMB untouched
+        # when it finds no new pairs — so a comb pack the dead
+        # attempt proposed keeps its entries, but the cleanse above
+        # took its index rows. Re-derive the index from the pack as
+        # it stands (the index's own contract: it describes the
+        # packs), restoring exactly what the proposal wrote.
+        for standing in store.packs(on=day):
+            if standing.status.value == "proposed" and standing.pack_id.startswith(
+                f"PACK-COMB-{day.isoformat()}"
+            ):
+                store.replace_allocations(
+                    [e.allocation for e in standing.entries if e.allocation],
+                    standing.pack_id,
+                )
+    store.audit(AuditEvent(
+        at=_now(), actor=actor, action="day_run_completed", subject=day.isoformat(),
+        detail=f"attempt {attempt} completed: posting pack "
+               f"{result.get('pack_id') or 'none'}, non-premium pack "
+               f"{result.get('non_premium_pack_id') or 'none'}, combination pack "
+               f"{result.get('combination_pack_id') or 'none'}"))
     return {
         "day": day.isoformat(),
         "pack_id": result.get("pack_id"),
@@ -454,4 +649,6 @@ def run_day(store: Store, objects: ObjectStore, reader, policy: PolicyConfig,
         "document_notes": result.get("document_notes", []),
         "outcomes": result.get("outcomes", []),
         "report": result.get("report"),
+        "attempt": attempt,
+        "recovered": recovery,
     }

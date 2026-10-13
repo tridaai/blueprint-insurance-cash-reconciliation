@@ -24,7 +24,7 @@ from .llm import make_reader
 from .nonpremium import non_premium_ledger
 from .objects import make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
-from .pipeline import ingest_dataset, run_day
+from .pipeline import DayRunError, ingest_dataset, run_day
 from .rematch import rematch_suspense
 from .report import broker_scorecard, day_report, proposal_quality, return_premiums_view
 from .today import today_view
@@ -119,7 +119,10 @@ def main() -> None:
         print(f"seeded: {len(ds.receivables)} policies, {len(ds.bank_lines)} bank lines, "
               f"{len(ds.remittances)} remittances")
     elif args.command == "run":
-        result = run_day(store, objects, make_reader(), policy, date.fromisoformat(args.day), actor=args.actor)
+        try:
+            result = run_day(store, objects, make_reader(), policy, date.fromisoformat(args.day), actor=args.actor)
+        except DayRunError as exc:
+            parser.exit(1, f"run refused: {exc}\n")
         print(json.dumps({"pack_id": result["pack_id"], "report": result["report"]}, indent=2))
     elif args.command == "report":
         print(json.dumps(day_report(store, date.fromisoformat(args.day), policy), indent=2))

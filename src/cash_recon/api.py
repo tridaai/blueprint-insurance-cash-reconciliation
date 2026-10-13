@@ -32,7 +32,7 @@ from .logging_setup import configure_logging, new_request_id
 from .nonpremium import non_premium_ledger
 from .objects import ObjectStore, make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
-from .pipeline import ingest_dataset, run_day
+from .pipeline import DayRunError, ingest_dataset, run_day
 from .rematch import rematch_suspense
 from .returns import ReturnError, line_history, record_return
 from .statement import StatementImportError, import_statement
@@ -198,7 +198,10 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.post("/api/days/{day}/run")
     def run(day: date, body: RunRequest):
         s = get_service()
-        result = run_day(s.store, s.objects, s.reader, s.policy, day, actor=body.actor)
+        try:
+            result = run_day(s.store, s.objects, s.reader, s.policy, day, actor=body.actor)
+        except DayRunError as exc:
+            raise HTTPException(409, str(exc)) from exc
         return {
             "day": result["day"],
             "pack_id": result["pack_id"],
