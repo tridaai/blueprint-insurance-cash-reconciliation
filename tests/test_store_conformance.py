@@ -316,8 +316,12 @@ def battery(store, tag: str = "") -> None:
     back = store.broker_statement(stmt.statement_id)
     assert back is not None and back.net_total == D("100.00")
     assert isinstance(back.lines[0].gross, Decimal)
-    assert [s.statement_id for s in store.broker_statements(
-        broker_id="BRK-ALDER", period="2026-10")] == [stmt.statement_id]
+    # The Postgres leg shares one database across runs, so the
+    # filtered read is checked for this run's statement rather
+    # than exact list equality (the day-claims discipline above).
+    assert stmt.statement_id in [
+        s.statement_id for s in store.broker_statements(
+            broker_id="BRK-ALDER", period="2026-10")]
     assert store.broker_statements(broker_id="BRK-ALDER", period="2026-11") == []
     assert store.broker_statement("BSTMT-NOPE") is None
     back.superseded_by = "BSTMT-NEWER"
