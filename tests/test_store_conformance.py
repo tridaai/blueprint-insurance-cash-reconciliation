@@ -21,6 +21,7 @@ import pytest
 
 from cash_recon.config import Policy as PolicyConfig
 from cash_recon.dataset import build_dataset
+from cash_recon.documents import EMBEDDING_DIM
 from cash_recon.llm import OfflineReader
 from cash_recon.models import (
     Allocation,
@@ -41,6 +42,7 @@ from cash_recon.models import (
 from cash_recon.objects import InMemoryObjectStore
 from cash_recon.pipeline import ingest_dataset, run_day
 from cash_recon.store import (
+    EmbeddingDimensionError,
     InMemoryStore,
     PostgresStore,
     SqliteStore,
@@ -49,6 +51,14 @@ from cash_recon.store import (
 )
 
 D = Decimal
+
+# The embedding contract is EMBEDDING_DIM (384) on every leg — the
+# Postgres column is vector(384), so the battery honours the real
+# contract instead of a toy vector the schema would reject. The
+# values are sixteenths: exact at the six decimals the Postgres
+# store formats its pgvector literal with, so the round-trip is
+# exact on all three stores.
+BATTERY_VECTOR = [((i % 8) + 1) / 16.0 for i in range(EMBEDDING_DIM)]
 
 
 def battery(store, tag: str = "") -> None:
@@ -78,8 +88,18 @@ def battery(store, tag: str = "") -> None:
     store.save_remittance(rem)
     assert store.remittance_by_hash(text_hash) is not None
     assert {r.remittance_id for r in store.remittances(on=date(2026, 9, 7))} >= {"REM-ALDER-01"}
-    store.set_embedding("REM-ALDER-01", [0.1, 0.2, 0.3])
-    assert store.embeddings()["REM-ALDER-01"] == pytest.approx([0.1, 0.2, 0.3])
+    store.set_embedding("REM-ALDER-01", BATTERY_VECTOR)
+    back_vector = store.embeddings()["REM-ALDER-01"]
+    assert len(back_vector) == EMBEDDING_DIM
+    assert back_vector == pytest.approx(BATTERY_VECTOR)
+
+    # The dimension contract is enforced by the store, in code, on
+    # every leg: a wrong-dimension vector is refused with the
+    # deliberate error — naming the expected dimension — and the
+    # stored vector is untouched.
+    with pytest.raises(EmbeddingDimensionError, match=str(EMBEDDING_DIM)):
+        store.set_embedding("REM-ALDER-01", [0.1, 0.2, 0.3])
+    assert store.embeddings()["REM-ALDER-01"] == pytest.approx(BATTERY_VECTOR)
 
     # Exceptions: added, filtered by status, updated in place.
     exc = ExceptionRecord(

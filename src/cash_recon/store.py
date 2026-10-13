@@ -20,6 +20,13 @@ SQLite file. Nothing else in the app knows which store is running.
 Amounts survive the round-trip as decimal strings inside the JSON
 payloads and are re-validated into the Pydantic models on the way
 out, so a Decimal that went in comes back a Decimal.
+
+Embeddings carry one contract on every store: `EMBEDDING_DIM`
+dimensions (documents.py; the Postgres column is `vector(384)`).
+`set_embedding` enforces it in code on all three implementations
+and raises `EmbeddingDimensionError` — the JSON-backed stores check
+too, so a wrong-dimension vector fails the same deliberate way
+everywhere, not only where pgvector happens to reject it.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from .documents import EMBEDDING_DIM
 from .models import (
     Allocation,
     AuditEvent,
@@ -79,6 +87,28 @@ def _json_default(obj):
 
 def dump(model) -> str:
     return json.dumps(model.model_dump(), default=_json_default)
+
+
+class EmbeddingDimensionError(ValueError):
+    """An embedding was offered at the wrong dimension.
+
+    The store contract is EMBEDDING_DIM dimensions on every profile
+    (the production schema's vector(384) — migrations/0002). Raised
+    by all three stores before anything is written, so the failure
+    is this deliberate message, never a raw driver exception from
+    whichever store happened to enforce the schema.
+    """
+
+
+def _checked_embedding(vector: list[float]) -> list[float]:
+    vec = [float(v) for v in vector]
+    if len(vec) != EMBEDDING_DIM:
+        raise EmbeddingDimensionError(
+            f"embedding has {len(vec)} dimensions; the store contract is "
+            f"{EMBEDDING_DIM} (cash_recon.documents.EMBEDDING_DIM; the "
+            f"Postgres schema is vector({EMBEDDING_DIM}), migrations/0002)"
+        )
+    return vec
 
 
 class Store(Protocol):
@@ -206,7 +236,7 @@ class InMemoryStore:
         return None
 
     def set_embedding(self, remittance_id, vector):
-        self._embeddings[remittance_id] = vector
+        self._embeddings[remittance_id] = _checked_embedding(vector)
 
     def embeddings(self):
         return dict(self._embeddings)
@@ -463,6 +493,7 @@ class PostgresStore:
         return Remittance.model_validate(row["payload"]) if row else None
 
     def set_embedding(self, remittance_id, vector):
+        vector = _checked_embedding(vector)
         literal = "[" + ",".join(f"{v:.6f}" for v in vector) + "]"
         self._put(
             "INSERT INTO remittance_embeddings (remittance_id, embedding) VALUES (%s, %s::vector) "
@@ -814,7 +845,7 @@ class SqliteStore:
         self._put(
             "INSERT INTO remittance_embeddings (remittance_id, embedding) VALUES (?, ?) "
             "ON CONFLICT (remittance_id) DO UPDATE SET embedding = excluded.embedding",
-            (remittance_id, json.dumps(vector)),
+            (remittance_id, json.dumps(_checked_embedding(vector))),
         )
 
     def embeddings(self):
