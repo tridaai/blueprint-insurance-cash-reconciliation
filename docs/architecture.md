@@ -92,9 +92,67 @@ unapplied. Otherwise it is a part-payment: allocated, with the
 shortfall a PARTIAL exception and the balance still collectable.
 
 **Every cent accounted, asserted.** A matcher outcome must satisfy
-`allocations + suspense == bank amount`; the matcher asserts it per
-line, and the daily report re-derives the identity over the whole
-day. A day that does not foot is reported NOT reconciled, in words.
+`allocations + payable offsets + suspense == bank amount`; the
+matcher asserts it per line, and the daily report re-derives the
+identity over the whole day. A day that does not foot is reported
+NOT reconciled, in words.
+
+**Broker rates are temporal.** Commission used to be one number on
+the broker record, read wherever cash-due was computed — a design
+that cannot say what rate a September wire should have netted at
+once the rate changes in October. `Broker.rate_history` is a list
+of dated periods and `rate_on(as_of)` is the single way any rate is
+read: the matcher prices a line at the rate in force on its value
+date (netting, the mismatch test, the named-installment path, the
+lump-sum candidates), the gate grosses up at the rate in force on
+the pack's value date, and the returns replay uses the same
+per-pack date — so a rate change reprices nothing that already
+happened, and every computation names the period it priced. The
+headline `commission_rate` remains as the current rate (and the
+answer for a record with no history), set to the newest period's
+rate whenever a history is booked.
+
+**A lump sum never crosses brokers.** Candidates for the proposers
+are built from the paying broker's open items only, and both
+readers validate proposals against that list — but the rule also
+stands in the matcher itself: a proposal naming an item whose
+policy belongs to another broker is refused whole, whoever produced
+it, and the wire falls through to unidentified. Two desks' money is
+never mixed by a settlement, and the refusal does not depend on
+the proposer's good behaviour.
+
+**Return premiums: a second ledger, the same gate.** Cancellation
+(`cancellations.py`) is a governed recording act with named
+refusals — the policy must be on the books, not already cancelled,
+and carrying term dates, because the computation is pro-rata by
+days and a pro-rata with nothing to stand on is a guess. Earned is
+billed premium × elapsed days ÷ term days (half-up at the cent —
+the computation is printed on the record); paid-to-date is the
+installments' applied sum on the billed basis; the return is the
+difference when positive. The payable it opens is a record with an
+append-only chain (opened / netted / paid), owed to the insured or
+the broker of record. Incoming cash for the cancelled policy meets
+the payable in the matcher, before the cancelled-policy exception:
+the offset is a pack entry like any other, so it lands only at
+approval — the gate stays the only writer, of payables too — and a
+per-run shadow ledger stops two wires in one run netting more than
+the payable holds. Payouts (`payouts.py`) reuse the gate's exact
+discipline and its single-approver limit: self-approval refused, a
+second approver above the limit, and approval re-validates each
+payable's standing amount, refusing the pack whole if netting moved
+one since assembly. The controls keep the ledgers apart on purpose:
+the day identity gains the netted term (cash that arrived and was
+accounted), while the close pack rolls payables on their own
+identity — owed money is not held cash, and an identity that mixed
+them would foot by lying.
+
+**The Today view is a read model, not a state.** The day-open
+checklist (`today.py`) derives six step states from the same
+records the tabs render — bank lines present, the day's pack,
+the open exception queue, proposed packs anywhere, re-match
+attempts stamped with the day they ran for, the day's cancellation
+and return records. Nothing is stored per day: a step cannot drift
+from the act it reports, because it *is* the act, re-read.
 
 **Documents are hostile until screened.** The screen runs before any
 reader — model or human-facing summary — sees a remittance. Flagged
@@ -239,7 +297,9 @@ policy reference is found in the description text as usual.
   JSONB with amounts as decimal strings, key columns beside them for
   the queries the desk runs. Numbered SQL migrations in `migrations/`
   are applied by the store at startup; `0002` adds the pgvector
-  embedding table, `0003` the payment-returns table. LangGraph
+  embedding table, `0003` the payment-returns table, `0004` the
+  return-premium tables (cancellations, payables, payout packs).
+  LangGraph
   checkpoints use the Postgres saver in the same database when
   `DATABASE_URL` is set. The allocations table is an index of pack
   entries; when the gate edits a pack, `replace_allocations` rewrites

@@ -124,7 +124,24 @@ dates, against already-applied cash) are checked in code before any
 tier runs.
 
 Every line ends fully accounted for, and the matcher asserts it:
-**allocations + suspense == the bank amount, to the cent.**
+**allocations + payable offsets + suspense == the bank amount, to
+the cent.** (The offset term is cash netted against a return-premium
+payable — see *Return premiums* below; on an ordinary line it is
+zero.) One rule stands in front of the tiers: cash for a cancelled
+policy meets any open return-premium payable on that policy first.
+And one boundary the tiers never cross: a lump sum is settled only
+within the paying broker's own book — a proposal, from any backend,
+that names another broker's open item is refused whole and the wire
+goes to suspense.
+
+Broker commission is **temporal**: a broker's rate is a history of
+dated periods, and the matcher prices every line at the rate in
+force on the line's own value date — at match time, at the gate,
+and when a return replays the arithmetic. A rate change mid-book
+therefore reprices nothing retroactively: earlier cash keeps the
+rate it was matched under, later cash nets at the new rate, and a
+wire netted at a superseded rate is judged against the rate in
+force, not the one the broker used.
 
 ## Installments, worked one by one
 
@@ -244,12 +261,57 @@ return, re-application — reads off the line's history
 Full-line returns only: a bank returning part of a line is refused
 at recording time, with the reason stated.
 
+## Return premiums
+
+Everything above is money arriving. A policy cancelled mid-term
+reverses the flow: the carrier owes the unearned premium back.
+Recording a cancellation (`POST /api/policies/{n}/cancel`,
+`cash-recon cancel`, the console's Packs tab) computes the return
+**in code, pro-rata by days** — billed premium × term days elapsed
+÷ term days, half-up at the cent — against what the installments
+say was actually paid, and the computation is printed line by line
+on the cancellation record. The difference opens a
+**return-premium payable**: owed to the insured, or to the broker
+of record where the broker collected the premium — stated on the
+payable, because the money goes back the way it came in. (When the
+insured is behind — earned ahead of paid — the record shows what
+they owe and no payable opens.)
+
+Cash that later arrives for the cancelled policy **nets against
+the payable first**, in code, before the cancelled-policy
+exception: the offset rides the day's posting pack like any other
+entry and reduces the payable only when the pack is approved, with
+the chain — opened, netted, paid — readable on the payable itself.
+Any remainder follows the existing paths (exception, suspense).
+
+Settling a payable takes a **payout pack** at the same human gate
+as posting: assembled by a named person from open payables, never
+self-approved, and a pack above the single-approver limit (the
+same `WRITE_OFF_SINGLE_LIMIT` the gate uses for write-offs) needs
+the second approver. Approval re-checks every payable against the
+pack — if cash netted against one meanwhile, the pack is refused
+whole rather than paying a stale figure. This system pays nothing:
+the approved output is a payout file (CSV) a human hands to the
+bank, with the approvals on the audit trail.
+
+The controls keep the two directions of cash apart on purpose. The
+day report gains a **netted** term — bank equals applied plus
+netted plus suspense — and return-premium control lines (payables
+opened, netted, paid out under approved packs). The close pack
+rolls the **payable ledger on its own identity** — opening
+payables + opened − netted − paid = closing payables — because a
+payable is money owed, not cash held, and forcing it into the bank
+identity would make both numbers lie.
+
 ## The daily report
 
 The control the day is judged by: bank total vs allocated vs posted
 vs in-suspense, by day and by broker. Bank must equal applied plus
-suspense to the cent, or the report says so in words and refuses to
-call the day reconciled. Suspense is aged in buckets (0–7, 8–30,
+suspense to the cent — plus, on a day when cancelled-policy cash
+netted against a payable, the netted amount as its own named term —
+or the report says so in words and refuses to call the day
+reconciled. The day's return premiums stand on the report as their
+own control lines: payables opened, cash netted, payouts approved. Suspense is aged in buckets (0–7, 8–30,
 31–60, 60+ days) with the oldest items named. Cash recovered by the
 re-match pass is shown as its own line for the day the recovery ran,
 by bank line — never folded silently into the day's allocations.
@@ -257,6 +319,18 @@ Returns recorded on the day stand on the report as their own
 control line — count and total — and the day a returned line was
 received restates its allocations net of the return, beside the
 gross figures, neither netted away silently.
+
+## The day-open checklist
+
+The console opens on a **Today** tab (`GET /api/today?date=…`,
+`cash-recon today`): the desk's morning in the order it is worked —
+statement imported? day run complete? exceptions open (how many,
+what is at issue, which is oldest)? packs awaiting the gate?
+suspense re-match tried against the books as they now stand?
+cancellations and returns recorded? Each step reads the same read
+models the tabs use and links to the tab that does the work; the
+checklist holds no state of its own, so a step is done exactly when
+the act underneath it has happened.
 
 ## Proposal quality
 
@@ -296,7 +370,13 @@ what the gate accepted as proposed, accepted with edits, and
 rejected. Approved write-offs stand in
 the roll as their own control line: they dispose of receivable
 deltas, not of suspense cash, so they are reported, never netted
-into the suspense identity. Export is one JSON plus a human-readable
+into the suspense identity. The pack also rolls the **payable
+ledger** on its own identity — opening payables + payables opened
+in the month − cash netted against them − payouts under approved
+payout packs = closing payables — each position reconstructed from
+the payables' own chains at the month boundaries, with its own
+footed flag; it never enters the suspense roll above it, because
+payables are money owed back, not cash held. Export is one JSON plus a human-readable
 text rendering of the same body, with a SHA-256 digest over it —
 the body carries no wall-clock stamps, so a pack regenerated from
 unchanged books is byte-identical. Assembling the pack changes
@@ -333,8 +413,8 @@ paperwork, never people, and it sends nothing.
 
 ## Evals
 
-`make evals` runs the synthetic month through the real pipeline and
-scores 42 golden cases committed at `evals/golden.jsonl`: every tier,
+`make evals` runs the synthetic months through the real pipeline and
+scores 52 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
@@ -351,7 +431,16 @@ the opening suspense ages into the right buckets; the broker
 scorecard's money foots to the daily reports; the September close
 pack foots with a stable digest; the example statement imports
 cleanly, dedupes on re-import, and a tampered control total is
-refused). The runner prints a
+refused), a second month — October — on the same books (a broker
+rate change mid-book priced by period, a renewal whose named
+installment settles the renewal term, a wire spanning two brokers'
+books refused whole), the **continuity control** (October's close
+opens with September's closing suspense exactly, each pack assembled
+from its own state of the books, so a change to September's close
+fails October's golden), and the return-premium cases (pro-rata to
+the cent, payable to broker vs insured, netting on the day report,
+payout self-approval refused, the second-approver rule, and a
+December payable ledger that foots on its own identity). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
@@ -365,12 +454,15 @@ src/cash_recon/
   models.py      the records: brokers, receivables, bank lines, packs
   money.py       Decimal money, the one rounding point
   config.py      policy thresholds (auto-apply, write-off limit, stale age)
-  dataset.py     the synthetic Northgate month, gold by construction
+  dataset.py     the synthetic Northgate months (September + October), gold by construction
   matcher.py     the five tiers, in code, with the footing assertion
   llm.py         the model port: reader, proposer, note drafter
   documents.py   the document screen + near-duplicate detection
   gate.py        packs, approvals, entry edits, write-offs, the posting file
   returns.py     returned payments: exact reversal, pack flags, the line's history
+  cancellations.py  mid-term cancellations: pro-rata return premiums, the payable they open
+  payouts.py     payout packs: payables settled at the gate, the payout file
+  today.py       the day-open checklist over the same read models
   workbench.py   the exception workbench: assignment, handling notes, the queue view
   report.py      the daily reconciliation report, suspense aging, the broker scorecard, proposal quality
   close_pack.py  the month-end close pack: control roll, digest, JSON + text export
@@ -388,8 +480,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 108 tests,
-42/42 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 133 tests,
+52/52 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, and the offline fallback is what the demo and the
