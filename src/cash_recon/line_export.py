@@ -31,6 +31,7 @@ Building it mutates nothing.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 from .close_pack import pack_digest
 from .money import ZERO, as_str
@@ -224,7 +225,18 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
                 })
                 entries_for_line.append(idx)
                 pack_wo += entry.write_off_amount or ZERO
-        if entries_for_line:
+        disp_for_line = None
+        if pack.disposition is not None:
+            for d in pack.disposition.items:
+                if d.bank_line_id == bank_line_id:
+                    disp_for_line = {
+                        "suspense_id": d.suspense_id,
+                        "kind": d.kind,
+                        "amount": as_str(d.amount),
+                        "currency": d.currency,
+                        "reason": d.reason,
+                    }
+        if entries_for_line or disp_for_line is not None:
             pack_ids.append(pack.pack_id)
             rejection = None
             for e in all_events:
@@ -235,11 +247,13 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
                 pack_kind = "rematch"
             elif pack.pack_id.startswith("PACK-COMB"):
                 pack_kind = "combination"
+            elif pack.pack_id.startswith("PACK-DISPOSE"):
+                pack_kind = "suspense_disposition"
             elif pack.pack_id.startswith("NPACK-"):
                 pack_kind = "non_premium_disposition"
             else:
                 pack_kind = "posting"
-            gate_history.append({
+            history_row = {
                 "pack_id": pack.pack_id,
                 "kind": pack_kind,
                 "value_date": pack.value_date.isoformat(),
@@ -254,7 +268,10 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
                 "write_offs_for_line": as_str(pack_wo),
                 "edits": pack_edits,
                 "rejection": rejection,
-            })
+            }
+            if disp_for_line is not None:
+                history_row["disposition"] = disp_for_line
+            gate_history.append(history_row)
 
     # -- exceptions, with their handling acts --------------------------
     exc_views = []
@@ -276,6 +293,29 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         if e.action == "suspense_rematch_attempt" and e.subject in susp_ids
     ]
     suspense_open = sum((i.amount for i in suspense if i.status == "open"), ZERO)
+    suspense_dispositioned = sum(
+        (i.amount for i in suspense if i.status == "dispositioned"), ZERO)
+    dispositioned_item = next(
+        (i for i in suspense if i.status == "dispositioned"), None)
+    suspense_disposition = None
+    if dispositioned_item is not None:
+        dpack = next(
+            (p for p in packs
+             if p.pack_id == dispositioned_item.disposition_pack_id), None)
+        suspense_disposition = {
+            "suspense_id": dispositioned_item.suspense_id,
+            "kind": dispositioned_item.disposition_kind,
+            "amount": as_str(dispositioned_item.amount),
+            "currency": dispositioned_item.currency,
+            "reason": dispositioned_item.disposition_reason,
+            "dispositioned_on": (
+                dispositioned_item.dispositioned_on.isoformat()
+                if dispositioned_item.dispositioned_on else None),
+            "pack_id": dispositioned_item.disposition_pack_id,
+            "pack_status": dpack.status.value if dpack else None,
+            "assembled_by": dpack.assembled_by if dpack else None,
+            "approvals": list(dpack.approvals) if dpack else [],
+        }
 
     # -- returns and re-sends, both ways -------------------------------
     resent_as = sorted(
@@ -335,6 +375,20 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
                if non_premium_disposition["pack_status"] == "approved" else
                " — at the gate, or decided; it never enters premium suspense.")
         )
+    elif dispositioned_item is not None:
+        state = "dispositioned from suspense"
+        if dispositioned_item.disposition_kind == "WRITE_OFF_INCOME":
+            destination = "written off to miscellaneous income"
+        else:
+            destination = ("moved to escheat review — the cash is owed to "
+                           "someone, and it is not income")
+        state_detail = (
+            f"Disposed of under dual control in pack "
+            f"{dispositioned_item.disposition_pack_id} on "
+            f"{dispositioned_item.dispositioned_on}: {destination}. "
+            f"Reason on the record: {dispositioned_item.disposition_reason}. "
+            "The item stays on the books in its disposition state."
+        )
     elif posted > ZERO and suspense_open == ZERO and pending == ZERO:
         state = "applied"
         state_detail = "Settled under approved pack(s); nothing outstanding."
@@ -365,7 +419,7 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         posted - reversed_amount + pending
         + offsets_posted + offsets_pending
         + np_posted + np_pending
-        + suspense_open + returned_amount
+        + suspense_open + suspense_dispositioned + returned_amount
     )
     foots = accounted == line.amount
     terms = [
@@ -377,6 +431,7 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         f"non-premium disposition posted {as_str(np_posted)}" if np_posted > ZERO else None,
         f"non-premium disposition at the gate {as_str(np_pending)}" if np_pending > ZERO else None,
         f"suspense open {as_str(suspense_open)}" if suspense_open > ZERO else None,
+        f"suspense dispositioned {as_str(suspense_dispositioned)}" if suspense_dispositioned > ZERO else None,
         f"returned to the payer {as_str(returned_amount)}" if rets else None,
     ]
     footing_note = (
@@ -428,6 +483,7 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
         "write_offs": write_offs,
         "exceptions": exc_views,
         "suspense": [_json(i) for i in suspense],
+        "suspense_disposition": suspense_disposition,
         "rematch_attempts": rematch_attempts,
         "gate_history": gate_history,
         "return": _json(rets[-1]) if rets else None,
@@ -442,6 +498,7 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
             "detail": state_detail,
             "allocations_posted": as_str(posted),
             "suspense_open": as_str(suspense_open),
+            "suspense_dispositioned": as_str(suspense_dispositioned),
             "returned": as_str(returned_amount),
         },
         "footing": {
@@ -453,6 +510,7 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
             "payable_offsets_posted": as_str(offsets_posted),
             "payable_offsets_at_gate": as_str(offsets_pending),
             "suspense_open": as_str(suspense_open),
+            "suspense_dispositioned": as_str(suspense_dispositioned),
             "returned_amount": as_str(returned_amount),
             "accounted": as_str(accounted),
             "foots": foots,
@@ -548,7 +606,11 @@ def render_line_export_text(export: dict) -> str:
             out.append(
                 f"  {i['suspense_id']} {i['amount']:>10} · received "
                 f"{i['received_date']} · {i['reason']} · [{i['status']}]"
-                + (f" · resolved {i['resolved_on']}" if i.get("resolved_on") else ""))
+                + (f" · resolved {i['resolved_on']}" if i.get("resolved_on") else "")
+                + (f" · dispositioned {i['disposition_kind']} on "
+                   f"{i['dispositioned_on']} in {i['disposition_pack_id']}: "
+                   f"{i['disposition_reason']}"
+                   if i.get("disposition_kind") else ""))
     if body["rematch_attempts"]:
         out += ["", "RE-MATCH ATTEMPTS"]
         for a in body["rematch_attempts"]:
@@ -600,6 +662,14 @@ def render_line_export_text(export: dict) -> str:
         f"  Payable offsets posted:      {f['payable_offsets_posted']:>10}",
         f"  Payable offsets at the gate: {f['payable_offsets_at_gate']:>10}",
         f"  Suspense open:               {f['suspense_open']:>10}",
+    ]
+    if Decimal(f.get("suspense_dispositioned") or "0.00") > ZERO:
+        out.append(
+            f"  Suspense dispositioned:      {f['suspense_dispositioned']:>10}"
+            + (f"  ({body['suspense_disposition']['kind']} in "
+               f"{body['suspense_disposition']['pack_id']})"
+               if body.get("suspense_disposition") else ""))
+    out += [
         f"  Returned to the payer:       {f['returned_amount']:>10}",
         f"  Accounted:                   {f['accounted']:>10}",
         f"  {f['note']}",

@@ -18,8 +18,11 @@ entered suspense. Per month:
   of the month's bank value;
 - **suspense dwell** — for suspense items received in the month
   and since resolved, the average days from receipt to
-  resolution (re-match and returns both resolve items; an item
-  still open has not finished dwelling and is not averaged in);
+  resolution (re-match and returns both resolve items; a
+  disposition under dual control is a resolution outcome too —
+  the item's dwell ends on its disposition date, the day the
+  desk stopped carrying the cash as open work; an item still
+  open has not finished dwelling and is not averaged in);
 - **re-match recovery rate** — of the suspense items a re-match
   pass attempted in the month, the share it recovered into an
   approved re-match pack;
@@ -119,9 +122,10 @@ def match_quality(store: Store, watch_policy: WatchPolicy | None = None) -> dict
         items_by_id[item.suspense_id] = item
         created = pos.created if pos.created is not None else item.amount
         received_by_month[_of(item.received_date)] += created
-        if item.resolved_on is not None:
+        dwell_end = item.resolved_on or item.dispositioned_on
+        if dwell_end is not None:
             dwell_by_month[_of(item.received_date)].append(
-                (item.resolved_on - item.received_date).days
+                (dwell_end - item.received_date).days
             )
 
     # Re-match attempts are audited per item; a recovery is an

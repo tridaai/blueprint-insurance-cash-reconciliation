@@ -11,12 +11,19 @@ where unapplied cash lives:
 
     opening suspense + cash received into suspense in the month
     − applied from suspense in the month
-    − returned from suspense in the month = closing suspense
+    − returned from suspense in the month
+    − disposed from suspense in the month = closing suspense
 
-The last term is the bank taking cash back: a returned line's
+The returned term is the bank taking cash back: a returned line's
 suspense leaves by return, not by application, and the pack carries
 the month's returns (count and total) as a control line of their
-own, with each return listed as a reversing entry.
+own, with each return listed as a reversing entry. The disposed
+term is the desk's own governed exit: cash that aged past every
+attempt to identify it, disposed of under a dual-control
+disposition pack (dispositions.py) — written off to income, or
+moved to escheat review. The roll carries the term split by kind,
+because the two are not the same money: the escheat-review share
+is owed to someone, and it is never income.
 
 Each suspense item's opening position is reconstructed from the
 records (the amount that entered suspense when its bank line was
@@ -47,13 +54,13 @@ human-readable text rendering are two views of one record.
 
 The suspense identity holds PER CURRENCY: on a book that holds
 more than one, the roll runs in each currency separately — opening
-+ received − applied − returned = closing in EUR and in USD alike,
-never a blended figure — and the headline roll is the functional
-currency's (USD). Beside the rolls, the pack carries functional
-equivalents of the closing suspense at month-end governed rates,
-labelled as translations: they present the position in one
-currency for a reader; they are not postings, and no control in
-the pack runs on them.
++ received − applied − returned − disposed = closing in EUR and in
+USD alike, never a blended figure — and the headline roll is the
+functional currency's (USD). Beside the rolls, the pack carries
+functional equivalents of the closing suspense at month-end
+governed rates, labelled as translations: they present the
+position in one currency for a reader; they are not postings, and
+no control in the pack runs on them.
 
 When a broker sent a statement for the month, the pack also
 cites the broker statement reconciliation for it — counts by
@@ -108,7 +115,12 @@ class _Position:
     folding it into applications. A return recorded before
     part-returns existed carries no stored share: it reads as the
     whole remaining position on its date, exactly as the position
-    was read before shares were recorded."""
+    was read before shares were recorded. A disposition under dual
+    control (dispositions.py) closes the position on the pack's
+    value date the item records as `dispositioned_on`: the whole
+    remaining position leaves on that date, through the roll's
+    disposed_from_suspense term — split by the item's disposition
+    kind — never through applications."""
 
     def __init__(self, item, created: Decimal | None, releases: list[tuple[date, Decimal]],
                  return_events: list[tuple[date, Decimal | None]] | None = None):
@@ -141,6 +153,13 @@ class _Position:
         return taken
 
     def open_at(self, as_of: date) -> Decimal:
+        if self.item.dispositioned_on is not None \
+                and as_of >= self.item.dispositioned_on:
+            # A disposition took the whole remaining position on
+            # its date: nothing of this item stands in suspense
+            # from that day on. (Before the date the position
+            # reads exactly as it did.)
+            return ZERO
         if self.created is None:
             return self.item.amount
         for d, share in self.return_events:
@@ -150,6 +169,16 @@ class _Position:
                 return ZERO
         released = sum((amt for d, amt in self.releases if d <= as_of), ZERO)
         return self.created - released - self._return_release_at(as_of)
+
+    def disposed_between(self, first: date, last: date) -> Decimal:
+        """The suspense this position's disposition took out, when
+        the disposition date falls inside [first, last] — the
+        roll's disposed term for a period, per position: the whole
+        position that stood the day before the disposition."""
+        d = self.item.dispositioned_on
+        if d is None or not (first <= d <= last):
+            return ZERO
+        return self.open_at(d - timedelta(days=1))
 
     def released_by_return(self) -> Decimal:
         """The amount the line's returns released in total: what was
@@ -392,14 +421,28 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             (pos.returned_between(first, last) for pos in subset),
             ZERO,
         )
+        r_disposed = sum(
+            (pos.disposed_between(first, last) for pos in subset),
+            ZERO,
+        )
+        r_disposed_by_kind = {
+            kind: sum(
+                (pos.disposed_between(first, last) for pos in subset
+                 if pos.item.disposition_kind == kind),
+                ZERO,
+            )
+            for kind in ("WRITE_OFF_INCOME", "ESCHEAT_REVIEW")
+        }
         r_closing = sum(
             (pos.open_at(last) for pos in subset if pos.item.received_date <= last),
             ZERO,
         )
-        r_roll_closing = r_opening + r_received - r_applied - r_returned
+        r_roll_closing = r_opening + r_received - r_applied - r_returned - r_disposed
         return {
             "opening": r_opening, "received": r_received, "applied": r_applied,
-            "returned": r_returned, "closing": r_closing,
+            "returned": r_returned, "disposed": r_disposed,
+            "disposed_by_kind": r_disposed_by_kind,
+            "closing": r_closing,
             "roll_closing": r_roll_closing, "difference": r_roll_closing - r_closing,
         }
 
@@ -423,6 +466,8 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
     received = headline["received"]
     applied = headline["applied"]
     returned_from_suspense = headline["returned"]
+    disposed_from_suspense = headline["disposed"]
+    disposed_by_kind = headline["disposed_by_kind"]
     closing = headline["closing"]
     roll_closing = headline["roll_closing"]
     difference = headline["difference"]
@@ -489,11 +534,13 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         difference == 0 and not discrepancies
     )
     multi_currency = len(currencies_present) > 1
+    any_disposed = any(roll["disposed"] > ZERO for roll in rolls.values())
     if footed and not multi_currency:
         footing_note = (
             "The month FOOTS: opening suspense + cash received into suspense "
             "− applied from suspense"
             + (" − returned from suspense" if returned_from_suspense > ZERO else "")
+            + (" − disposed from suspense" if disposed_from_suspense > ZERO else "")
             + " = closing suspense, to the cent, and the "
             "closing figure agrees with the suspense ledger."
         )
@@ -501,7 +548,9 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
         footing_note = (
             "The month FOOTS in each currency: opening suspense + cash "
             "received into suspense − applied from suspense − returned from "
-            "suspense = closing suspense, per currency, to the cent, and "
+            "suspense"
+            + (" − disposed from suspense" if any_disposed else "")
+            + " = closing suspense, per currency, to the cent, and "
             "each currency's closing figure agrees with the suspense "
             "ledger. The functional figures below are translations at "
             "month-end rates — presentation, not postings."
@@ -567,6 +616,10 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             "received_into_suspense": as_str(received),
             "applied_from_suspense": as_str(applied),
             "returned_from_suspense": as_str(returned_from_suspense),
+            "disposed_from_suspense": as_str(disposed_from_suspense),
+            "disposed_by_kind": {
+                kind: as_str(total) for kind, total in disposed_by_kind.items()
+            },
             "returns_in_month": {
                 "count": len(month_returns),
                 "total": as_str(sum((r.amount for r in month_returns), ZERO)),
@@ -584,6 +637,11 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
                     "received_into_suspense": as_str(roll["received"]),
                     "applied_from_suspense": as_str(roll["applied"]),
                     "returned_from_suspense": as_str(roll["returned"]),
+                    "disposed_from_suspense": as_str(roll["disposed"]),
+                    "disposed_by_kind": {
+                        kind: as_str(total)
+                        for kind, total in roll["disposed_by_kind"].items()
+                    },
                     "closing_suspense": as_str(roll["closing"]),
                     "roll_closing_suspense": as_str(roll["roll_closing"]),
                     "difference": as_str(roll["difference"]),
@@ -718,6 +776,16 @@ def render_close_pack_text(export: dict) -> str:
         f"  Received into suspense:      {roll['received_into_suspense']:>12}",
         f"  Applied from suspense:       {roll['applied_from_suspense']:>12}",
         f"  Returned from suspense:      {roll['returned_from_suspense']:>12}  (cash the bank took back; it leaves suspense by return, not by application)",
+    ]
+    if Decimal(roll.get("disposed_from_suspense") or "0.00") > ZERO:
+        kinds = roll.get("disposed_by_kind") or {}
+        out.append(
+            f"  Disposed from suspense:      {roll['disposed_from_suspense']:>12}  "
+            f"(dual-control dispositions: write-off to income "
+            f"{kinds.get('WRITE_OFF_INCOME', '0.00')}; escheat review "
+            f"{kinds.get('ESCHEAT_REVIEW', '0.00')} — escheat-review cash is "
+            "owed to someone and is not income)")
+    out += [
         f"  Payment returns in month:    {roll['returns_in_month']['count']:>12}  totalling {roll['returns_in_month']['total']} (reversing entries below"
         + (f"; {roll['returns_in_month']['partial_count']} of them part-returns totalling {roll['returns_in_month']['partial_total']}"
            if roll['returns_in_month'].get('partial_count') else "") + ")",
@@ -733,7 +801,11 @@ def render_close_pack_text(export: dict) -> str:
             out.append(
                 f"  {ccy}: opening {r['opening_suspense']} + received into suspense "
                 f"{r['received_into_suspense']} − applied {r['applied_from_suspense']} "
-                f"− returned {r['returned_from_suspense']} = closing "
+                f"− returned {r['returned_from_suspense']}"
+                + (f" − disposed {r['disposed_from_suspense']}"
+                   if Decimal(r.get("disposed_from_suspense") or "0.00") > ZERO
+                   else "")
+                + f" = closing "
                 f"{r['closing_suspense']} — {'FOOTS' if r['footed'] else 'NOT FOOTED'}"
             )
         cash_by_ccy = roll.get("cash_received_in_month_by_currency") or {}

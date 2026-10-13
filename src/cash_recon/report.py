@@ -21,6 +21,7 @@ from datetime import date
 from decimal import Decimal
 
 from .config import Policy as PolicyConfig
+from .dispositions import disposition_decisions
 from .fx import FUNCTIONAL_CURRENCY, rate_on, to_functional
 from .models import ExceptionCode, Tier
 from .money import ZERO, cents
@@ -501,6 +502,7 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
         "rematch_recoveries": rematch_recoveries(store, day),
         "non_premium": non_premium,
         "combination_settlements": combination_settlements(store, day),
+        "suspense_dispositions": disposition_decisions(store, day),
         "suspense_aging": suspense_aging(store, day),
         "stale_suspense": [
             {
@@ -676,7 +678,8 @@ def broker_scorecard(store: Store, as_of: date, month: tuple[int, int] | None = 
     T4 (the netting tiers), the share that raised no exception at
     all. Average days unapplied: over every suspense item the
     broker's lines produced, resolved items count to their
-    resolution date, open ones to `as_of`.
+    resolution date, dispositioned items to their disposition
+    date, open ones to `as_of`.
 
     With `month=(year, month)` the card is scoped to that calendar
     month — bank lines received in it, remittances received in it,
@@ -744,7 +747,10 @@ def broker_scorecard(store: Store, as_of: date, month: tuple[int, int] | None = 
             slot["count"] += 1
             slot["amount"] += e.amount
         items = [i for i in all_suspense if i.bank_line_id in mine_ids]
-        days = [((i.resolved_on or as_of) - i.received_date).days for i in items]
+        days = [
+            ((i.resolved_on or i.dispositioned_on or as_of) - i.received_date).days
+            for i in items
+        ]
         avg_days = (
             str(cents(Decimal(sum(days)) / Decimal(len(days)))) if days else None
         )
