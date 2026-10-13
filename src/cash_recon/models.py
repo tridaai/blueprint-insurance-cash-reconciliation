@@ -125,6 +125,12 @@ class Receivable(BaseModel):
     broker_id: str | None  # None = direct-billed insured
     status: PolicyStatus = PolicyStatus.ACTIVE
     installments: list[Installment] = Field(default_factory=list)
+    # The current term's span, when the billing record carries it.
+    # The return-premium computation stands on these two dates; a
+    # policy whose record has neither cannot be cancelled in this
+    # system, and the refusal says so.
+    term_start: date | None = None
+    term_end: date | None = None  # exclusive: the first day not covered
 
     @property
     def open_balance(self) -> Decimal:
@@ -248,11 +254,25 @@ class EntryEdit(BaseModel):
     after_amount: Decimal
 
 
+class PayableOffset(BaseModel):
+    """Cash from one bank line netted against a return-premium
+    payable: the carrier owed the return premium back, the payer
+    sent more cash for the same cancelled policy, and the two meet
+    here. The offset is proposed by the matcher and lands on the
+    payable only when its pack is approved, like every allocation."""
+
+    bank_line_id: str
+    payable_id: str
+    policy_number: str
+    amount: Decimal
+
+
 class PostingEntry(BaseModel):
     """One line of a posting pack: an allocation, or a delta write-off."""
 
-    kind: str  # "allocation" | "write_off"
+    kind: str  # "allocation" | "write_off" | "payable_offset"
     allocation: Allocation | None = None
+    payable_offset: PayableOffset | None = None
     write_off_policy: str | None = None
     write_off_amount: Decimal | None = None
     write_off_exception_id: str | None = None
@@ -295,6 +315,13 @@ class PostingPack(BaseModel):
             Decimal("0.00"),
         )
 
+    @property
+    def offset_total(self) -> Decimal:
+        return sum(
+            (e.payable_offset.amount for e in self.entries if e.payable_offset),
+            Decimal("0.00"),
+        )
+
 
 class PaymentReturn(BaseModel):
     """A bank return advice worked against an applied bank line.
@@ -315,6 +342,108 @@ class PaymentReturn(BaseModel):
     amount: Decimal  # the full bank-line amount, always
     pack_ids: list[str] = Field(default_factory=list)  # approved packs that carried the line
     detail: str = ""
+
+
+class Cancellation(BaseModel):
+    """A policy cancelled mid-term, with the return-premium
+    computation shown line by line on the record.
+
+    Earned premium is pro-rata by days over the term; paid to date
+    is what the installments say was applied, on the billed basis.
+    The difference, when the insured has paid ahead of what was
+    earned, is the return premium — money the carrier owes back,
+    carried as a ReturnPremiumPayable. When the insured is behind,
+    the record shows what they owe and no payable opens."""
+
+    cancellation_id: str
+    policy_number: str
+    effective_date: date
+    recorded_on: date
+    recorded_by: str
+    reason: str = ""
+    premium_total: Decimal  # billed premium, all installments
+    term_days: int
+    elapsed_days: int  # term days earned at the effective date
+    earned_premium: Decimal
+    paid_to_date: Decimal
+    return_premium: Decimal  # max(0, paid − earned)
+    insured_owes: Decimal  # max(0, earned − paid); a receivable fact, no payable
+    payee_kind: str  # "insured" | "broker" — who the return is owed to
+    payee_name: str
+    broker_id: str | None
+    payable_id: str | None  # None when no return premium is due
+    computation: list[str] = Field(default_factory=list)
+
+
+class PayableEvent(BaseModel):
+    """One movement on a payable's chain: opened, netted against an
+    incoming bank line, or paid out under an approved payout pack.
+    The chain is the payable's history, readable in order."""
+
+    on: date
+    kind: str  # "opened" | "netted" | "paid"
+    amount: Decimal
+    ref: str  # cancellation id / bank line id / payout pack id
+    note: str = ""
+
+
+class ReturnPremiumPayable(BaseModel):
+    """Money the carrier owes back on a cancelled policy.
+
+    Opened by a cancellation, reduced two ways only: netted against
+    later cash for the same policy (through a posting pack at the
+    gate) or paid out under an approved payout pack. It is a ledger
+    of its own — it never enters the bank identity; the close pack
+    rolls it separately and says so."""
+
+    payable_id: str
+    policy_number: str
+    cancellation_id: str
+    payee_kind: str  # "insured" | "broker"
+    payee_name: str
+    broker_id: str | None
+    amount: Decimal  # the return premium as computed at cancellation
+    amount_netted: Decimal = Decimal("0.00")
+    amount_paid: Decimal = Decimal("0.00")
+    status: str = "open"  # open | settled (netted to zero) | paid
+    opened_on: date
+    events: list[PayableEvent] = Field(default_factory=list)
+
+    @property
+    def remaining(self) -> Decimal:
+        return self.amount - self.amount_netted - self.amount_paid
+
+
+class PayoutEntry(BaseModel):
+    """One line of a payout pack: a payable paid in full, at the
+    amount standing when the pack was assembled."""
+
+    payable_id: str
+    policy_number: str
+    payee_kind: str
+    payee_name: str
+    broker_id: str | None
+    amount: Decimal
+
+
+class PayoutPack(BaseModel):
+    """Proposed return-premium payouts, decided at the same human
+    gate as posting packs: assembled by a named person, approved by
+    a different one, a second approver above the single-approver
+    limit. Approval produces a payout file; this system pays
+    nothing itself."""
+
+    pack_id: str
+    value_date: date
+    assembled_by: str
+    entries: list[PayoutEntry] = Field(default_factory=list)
+    status: PackStatus = PackStatus.PROPOSED
+    approvals: list[str] = Field(default_factory=list)
+    decided_at: datetime | None = None
+
+    @property
+    def total(self) -> Decimal:
+        return sum((e.amount for e in self.entries), Decimal("0.00"))
 
 
 class AuditEvent(BaseModel):

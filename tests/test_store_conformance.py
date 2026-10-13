@@ -26,10 +26,15 @@ from cash_recon.models import (
     Allocation,
     AuditEvent,
     BankLine,
+    Cancellation,
     ExceptionCode,
     ExceptionRecord,
+    PayableEvent,
     PaymentReturn,
+    PayoutEntry,
+    PayoutPack,
     PostingPack,
+    ReturnPremiumPayable,
     ReturnReason,
     SuspenseItem,
 )
@@ -139,6 +144,50 @@ def battery(store, tag: str = "") -> None:
     assert ret.return_id in {r.return_id for r in store.returns(on=date(2026, 9, 4))}
     mine = [r for r in store.returns() if r.return_id == ret.return_id]
     assert mine and isinstance(mine[0].amount, Decimal)
+
+    # Return premiums: the cancellation, its payable (saved, moved,
+    # re-read with its chain intact), and a payout pack.
+    cxl = Cancellation(
+        cancellation_id=f"CXL-{tag}BATTERY", policy_number="NSP-1003",
+        effective_date=date(2026, 12, 1), recorded_on=date(2026, 12, 1),
+        recorded_by="battery", premium_total=D("9875.50"), term_days=365,
+        elapsed_days=91, earned_premium=D("2461.00"), paid_to_date=D("4937.76"),
+        return_premium=D("2476.76"), insured_owes=D("0.00"),
+        payee_kind="broker", payee_name="Bayline Risk Partners",
+        broker_id="BRK-BAYLINE", payable_id=f"PAY-{tag}BATTERY",
+        computation=["battery computation"],
+    )
+    store.add_cancellation(cxl)
+    assert store.cancellation_for("NSP-1003").return_premium == D("2476.76")
+    assert store.cancellation_for("NSP-9999") is None
+    payable = ReturnPremiumPayable(
+        payable_id=f"PAY-{tag}BATTERY", policy_number="NSP-1003",
+        cancellation_id=cxl.cancellation_id, payee_kind="broker",
+        payee_name="Bayline Risk Partners", broker_id="BRK-BAYLINE",
+        amount=D("2476.76"), opened_on=date(2026, 12, 1),
+        events=[PayableEvent(on=date(2026, 12, 1), kind="opened",
+                             amount=D("2476.76"), ref=cxl.cancellation_id)],
+    )
+    store.save_payable(payable)
+    payable.amount_netted = D("476.76")
+    payable.events.append(PayableEvent(on=date(2026, 12, 3), kind="netted",
+                                       amount=D("476.76"), ref="BL-001"))
+    store.save_payable(payable)
+    back_payable = store.payable_for_policy("NSP-1003")
+    assert back_payable.remaining == D("2000.00")
+    assert [e.kind for e in back_payable.events] == ["opened", "netted"]
+    assert store.payable(back_payable.payable_id).status == "open"
+    assert store.payables(status="open") and not store.payables(status="paid")
+    payout = PayoutPack(
+        pack_id=f"PAYOUT-{tag}BATTERY", value_date=date(2026, 12, 4),
+        assembled_by="battery",
+        entries=[PayoutEntry(payable_id=payable.payable_id, policy_number="NSP-1003",
+                             payee_kind="broker", payee_name="Bayline Risk Partners",
+                             broker_id="BRK-BAYLINE", amount=D("2000.00"))],
+    )
+    store.save_payout_pack(payout)
+    assert store.payout_pack(payout.pack_id).total == D("2000.00")
+    assert payout.pack_id in {p.pack_id for p in store.payout_packs(on=date(2026, 12, 4))}
 
     # Audit: order preserved, subject filter works, timestamps return
     # as datetimes whatever the store keeps underneath.

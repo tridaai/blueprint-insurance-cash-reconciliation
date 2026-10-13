@@ -41,11 +41,14 @@ from .models import (
     AuditEvent,
     BankLine,
     Broker,
+    Cancellation,
     ExceptionRecord,
     PaymentReturn,
+    PayoutPack,
     PostingPack,
     Receivable,
     Remittance,
+    ReturnPremiumPayable,
     SuspenseItem,
 )
 
@@ -108,6 +111,16 @@ class Store(Protocol):
     def save_pack(self, pack: PostingPack) -> None: ...
     def pack(self, pack_id: str) -> PostingPack | None: ...
     def packs(self, on: date | None = None) -> list[PostingPack]: ...
+    def add_cancellation(self, cxl: Cancellation) -> None: ...
+    def cancellations(self) -> list[Cancellation]: ...
+    def cancellation_for(self, policy_number: str) -> Cancellation | None: ...
+    def save_payable(self, payable: ReturnPremiumPayable) -> None: ...
+    def payable(self, payable_id: str) -> ReturnPremiumPayable | None: ...
+    def payables(self, status: str | None = None) -> list[ReturnPremiumPayable]: ...
+    def payable_for_policy(self, policy_number: str) -> ReturnPremiumPayable | None: ...
+    def save_payout_pack(self, pack: PayoutPack) -> None: ...
+    def payout_pack(self, pack_id: str) -> PayoutPack | None: ...
+    def payout_packs(self, on: date | None = None) -> list[PayoutPack]: ...
     def audit(self, event: AuditEvent) -> None: ...
     def audit_events(self, subject: str | None = None) -> list[AuditEvent]: ...
 
@@ -128,6 +141,9 @@ class InMemoryStore:
         self._suspense: dict[str, SuspenseItem] = {}
         self._packs: dict[str, PostingPack] = {}
         self._returns: dict[str, PaymentReturn] = {}
+        self._cancellations: dict[str, Cancellation] = {}
+        self._payables: dict[str, ReturnPremiumPayable] = {}
+        self._payout_packs: dict[str, PayoutPack] = {}
         self._audit: list[AuditEvent] = []
 
     # -- reference data -------------------------------------------------
@@ -235,6 +251,55 @@ class InMemoryStore:
 
     def packs(self, on=None):
         rows = copy.deepcopy(list(self._packs.values()))
+        return [r for r in rows if on is None or r.value_date == on]
+
+    # -- return premiums -------------------------------------------------
+    def add_cancellation(self, cxl):
+        self._cancellations[cxl.cancellation_id] = copy.deepcopy(cxl)
+
+    def cancellations(self):
+        rows = sorted(
+            copy.deepcopy(list(self._cancellations.values())),
+            key=lambda c: (c.recorded_on, c.cancellation_id),
+        )
+        return rows
+
+    def cancellation_for(self, policy_number):
+        for cxl in self._cancellations.values():
+            if cxl.policy_number == policy_number:
+                return copy.deepcopy(cxl)
+        return None
+
+    def save_payable(self, payable):
+        self._payables[payable.payable_id] = copy.deepcopy(payable)
+
+    def payable(self, payable_id):
+        return copy.deepcopy(self._payables.get(payable_id))
+
+    def payables(self, status=None):
+        rows = sorted(
+            copy.deepcopy(list(self._payables.values())),
+            key=lambda p: (p.opened_on, p.payable_id),
+        )
+        return [r for r in rows if status is None or r.status == status]
+
+    def payable_for_policy(self, policy_number):
+        for payable in self._payables.values():
+            if payable.policy_number == policy_number:
+                return copy.deepcopy(payable)
+        return None
+
+    def save_payout_pack(self, pack):
+        self._payout_packs[pack.pack_id] = copy.deepcopy(pack)
+
+    def payout_pack(self, pack_id):
+        return copy.deepcopy(self._payout_packs.get(pack_id))
+
+    def payout_packs(self, on=None):
+        rows = sorted(
+            copy.deepcopy(list(self._payout_packs.values())),
+            key=lambda p: (p.value_date, p.pack_id),
+        )
         return [r for r in rows if on is None or r.value_date == on]
 
     def audit(self, event):
@@ -485,6 +550,75 @@ class PostgresStore:
         else:
             rows = self._all("SELECT payload FROM posting_packs WHERE value_date = %s ORDER BY pack_id", (on,))
         return [PostingPack.model_validate(r["payload"]) for r in rows]
+
+    # -- return premiums ---------------------------------------------------
+    def add_cancellation(self, cxl):
+        self._put(
+            "INSERT INTO cancellations (cancellation_id, policy_number, effective_date, payload) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (cancellation_id) DO NOTHING",
+            (cxl.cancellation_id, cxl.policy_number, cxl.effective_date, dump(cxl)),
+        )
+
+    def cancellations(self):
+        rows = self._all("SELECT payload FROM cancellations ORDER BY recorded_on, cancellation_id")
+        return [Cancellation.model_validate(r["payload"]) for r in rows]
+
+    def cancellation_for(self, policy_number):
+        row = self._one(
+            "SELECT payload FROM cancellations WHERE policy_number = %s", (policy_number,)
+        )
+        return Cancellation.model_validate(row["payload"]) if row else None
+
+    def save_payable(self, payable):
+        self._put(
+            "INSERT INTO return_premium_payables (payable_id, policy_number, status, payload) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (payable_id) DO UPDATE SET "
+            "status = EXCLUDED.status, payload = EXCLUDED.payload",
+            (payable.payable_id, payable.policy_number, payable.status, dump(payable)),
+        )
+
+    def payable(self, payable_id):
+        row = self._one(
+            "SELECT payload FROM return_premium_payables WHERE payable_id = %s", (payable_id,)
+        )
+        return ReturnPremiumPayable.model_validate(row["payload"]) if row else None
+
+    def payables(self, status=None):
+        if status is None:
+            rows = self._all("SELECT payload FROM return_premium_payables ORDER BY opened_on, payable_id")
+        else:
+            rows = self._all(
+                "SELECT payload FROM return_premium_payables WHERE status = %s ORDER BY opened_on, payable_id",
+                (status,),
+            )
+        return [ReturnPremiumPayable.model_validate(r["payload"]) for r in rows]
+
+    def payable_for_policy(self, policy_number):
+        row = self._one(
+            "SELECT payload FROM return_premium_payables WHERE policy_number = %s", (policy_number,)
+        )
+        return ReturnPremiumPayable.model_validate(row["payload"]) if row else None
+
+    def save_payout_pack(self, pack):
+        self._put(
+            "INSERT INTO payout_packs (pack_id, value_date, status, payload) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (pack_id) DO UPDATE SET "
+            "status = EXCLUDED.status, payload = EXCLUDED.payload",
+            (pack.pack_id, pack.value_date, pack.status.value, dump(pack)),
+        )
+
+    def payout_pack(self, pack_id):
+        row = self._one("SELECT payload FROM payout_packs WHERE pack_id = %s", (pack_id,))
+        return PayoutPack.model_validate(row["payload"]) if row else None
+
+    def payout_packs(self, on=None):
+        if on is None:
+            rows = self._all("SELECT payload FROM payout_packs ORDER BY value_date, pack_id")
+        else:
+            rows = self._all(
+                "SELECT payload FROM payout_packs WHERE value_date = %s ORDER BY pack_id", (on,)
+            )
+        return [PayoutPack.model_validate(r["payload"]) for r in rows]
 
     def audit(self, event):
         self._put(
@@ -767,6 +901,76 @@ class SqliteStore:
                 (on.isoformat(),),
             )
         return [PostingPack.model_validate(self._payload(r)) for r in rows]
+
+    # -- return premiums ---------------------------------------------------
+    def add_cancellation(self, cxl):
+        self._put(
+            "INSERT OR IGNORE INTO cancellations (cancellation_id, policy_number, effective_date, payload) "
+            "VALUES (?, ?, ?, ?)",
+            (cxl.cancellation_id, cxl.policy_number, cxl.effective_date.isoformat(), dump(cxl)),
+        )
+
+    def cancellations(self):
+        rows = self._all("SELECT payload FROM cancellations ORDER BY recorded_on, cancellation_id")
+        return [Cancellation.model_validate(self._payload(r)) for r in rows]
+
+    def cancellation_for(self, policy_number):
+        row = self._one(
+            "SELECT payload FROM cancellations WHERE policy_number = ?", (policy_number,)
+        )
+        return Cancellation.model_validate(self._payload(row)) if row else None
+
+    def save_payable(self, payable):
+        self._put(
+            "INSERT INTO return_premium_payables (payable_id, policy_number, status, payload) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT (payable_id) DO UPDATE SET "
+            "status = excluded.status, payload = excluded.payload",
+            (payable.payable_id, payable.policy_number, payable.status, dump(payable)),
+        )
+
+    def payable(self, payable_id):
+        row = self._one(
+            "SELECT payload FROM return_premium_payables WHERE payable_id = ?", (payable_id,)
+        )
+        return ReturnPremiumPayable.model_validate(self._payload(row)) if row else None
+
+    def payables(self, status=None):
+        if status is None:
+            rows = self._all("SELECT payload FROM return_premium_payables ORDER BY opened_on, payable_id")
+        else:
+            rows = self._all(
+                "SELECT payload FROM return_premium_payables WHERE status = ? ORDER BY opened_on, payable_id",
+                (status,),
+            )
+        return [ReturnPremiumPayable.model_validate(self._payload(r)) for r in rows]
+
+    def payable_for_policy(self, policy_number):
+        row = self._one(
+            "SELECT payload FROM return_premium_payables WHERE policy_number = ?", (policy_number,)
+        )
+        return ReturnPremiumPayable.model_validate(self._payload(row)) if row else None
+
+    def save_payout_pack(self, pack):
+        self._put(
+            "INSERT INTO payout_packs (pack_id, value_date, status, payload) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT (pack_id) DO UPDATE SET "
+            "status = excluded.status, payload = excluded.payload",
+            (pack.pack_id, pack.value_date.isoformat(), pack.status.value, dump(pack)),
+        )
+
+    def payout_pack(self, pack_id):
+        row = self._one("SELECT payload FROM payout_packs WHERE pack_id = ?", (pack_id,))
+        return PayoutPack.model_validate(self._payload(row)) if row else None
+
+    def payout_packs(self, on=None):
+        if on is None:
+            rows = self._all("SELECT payload FROM payout_packs ORDER BY value_date, pack_id")
+        else:
+            rows = self._all(
+                "SELECT payload FROM payout_packs WHERE value_date = ? ORDER BY pack_id",
+                (on.isoformat(),),
+            )
+        return [PayoutPack.model_validate(self._payload(r)) for r in rows]
 
     def audit(self, event):
         self._put(
