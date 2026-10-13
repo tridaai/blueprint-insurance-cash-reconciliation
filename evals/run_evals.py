@@ -18,7 +18,13 @@ carries the planted proofs for the combination pass (two bills
 settled by pairs of wires, a cent-short near miss and a cross-payer
 exact sum that must NOT combine) and the non-premium classifier
 (interest, an own transfer, a fee rebate, and a lookalike premium
-payment that must not be classified away). The live-mode
+payment that must not be classified away). The resolution
+scenarios run in small worlds of their own: unidentified cash
+resolved by its own narrative, an amount two brokers' rates both
+explain where only the narrative disambiguates, a wire with no
+defensible candidate at all, and a rejected docket — the scan's
+candidate set and the gate's choice graded, never a model's
+taste. The live-mode
 remittance-reading set is a separate runner (run_live_evals.py)
 and is deliberately not part of this gate.
 
@@ -40,15 +46,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cash_recon.config import Policy as PolicyConfig  # noqa: E402
 from cash_recon.dataset import build_dataset, build_november_dataset, build_october_dataset  # noqa: E402
-from cash_recon.gate import approve_pack  # noqa: E402
+from cash_recon.gate import approve_pack, reject_pack  # noqa: E402
 from cash_recon.llm import OfflineReader  # noqa: E402
 from cash_recon.models import (  # noqa: E402
     BankLine,
     Broker,
+    ExceptionCode,
+    ExceptionRecord,
     Installment,
     PolicyStatus,
     Receivable,
     Remittance,
+    SuspenseItem,
 )
 from cash_recon.objects import InMemoryObjectStore  # noqa: E402
 from cash_recon.pipeline import (  # noqa: E402
@@ -58,7 +67,12 @@ from cash_recon.pipeline import (  # noqa: E402
     run_day,
 )
 from cash_recon.rematch import rematch_suspense  # noqa: E402
-from cash_recon.report import broker_scorecard, day_report, suspense_aging  # noqa: E402
+from cash_recon.report import broker_scorecard, day_report, proposal_quality, suspense_aging  # noqa: E402
+from cash_recon.resolution import (  # noqa: E402
+    ResolutionError,
+    assemble_resolution_pack,
+    scan_candidates,
+)
 from cash_recon.store import InMemoryStore  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "golden.jsonl"
@@ -224,6 +238,70 @@ def golden_rows() -> list[dict]:
             "nsp1053_open": "4000.00",
         },
     })
+    rows.extend([
+        {
+            # Planted unidentified cash, resolvable by the wire's
+            # own text: the bank mangled the reference ("NSP 7001")
+            # past the matcher's strict pattern, so the line sits
+            # UNIDENTIFIED — and the governed scan reads the
+            # evidence, quotes it, and puts the one candidate to
+            # the gate.
+            "case": "RESOLUTION-NARRATIVE", "kind": "resolution",
+            "expect": {
+                "candidates": 1,
+                "interpretations": ["narrative"],
+                "evidence": ["NSP 7001"],
+                "pack_prefix": "PACK-RESOLVE-",
+                "item_status": "resolved",
+                "exception_status": "resolved",
+                "nsp7001_open": "700.00",
+                "quality_chosen": 1,
+            },
+        },
+        {
+            # The amount foots at TWO brokers' rates; only the
+            # narrative says which desk sent it. Gold grades the
+            # scan's candidate set and the evidence on it — the
+            # wrong-broker candidate must be present and bare —
+            # and the pack flow, not any model's taste.
+            "case": "RESOLUTION-DISAMBIGUATED", "kind": "resolution",
+            "expect": {
+                "candidates": 2,
+                "policies": ["NSP-7010", "NSP-7011"],
+                "evidenced_policy": "NSP-7011",
+                "wrong_broker_evidence": "",
+                "nsp7011_open": "0.00",
+                "nsp7010_open": "10000.00",
+                "quality_chosen": 1,
+                "quality_lapsed": 1,
+            },
+        },
+        {
+            # Nothing fits and nothing is named: the scan comes
+            # back empty, assembly refuses in words, the item
+            # stays open, and no pack exists.
+            "case": "RESOLUTION-NO-CANDIDATE", "kind": "resolution",
+            "expect": {
+                "candidates": 0,
+                "assembly_refused": True,
+                "refusal_names_the_gap": True,
+                "packs": 0,
+                "item_status": "open",
+            },
+        },
+        {
+            # A decided docket that was rejected: the item stays
+            # open, the candidates stay on the rejected pack's
+            # record, and the quality report grades them rejected.
+            "case": "RESOLUTION-REJECTED", "kind": "resolution",
+            "expect": {
+                "candidates_on_record": 2,
+                "item_status": "open",
+                "chosen_candidate": None,
+                "quality_rejected": 2,
+            },
+        },
+    ])
     rows.append({
         "case": "CLOSE-2026-10", "kind": "close_october",
         "expect": {
@@ -723,6 +801,133 @@ def rematch_scenarios() -> dict[str, dict]:
         "pack_id": summary2["pack_id"],
     }
     return {"REMATCH-LATE-ADVICE": late_advice, "REMATCH-STAYS-OPEN": stays_open}
+
+
+def resolution_scenarios() -> dict[str, dict]:
+    """The planted unidentified-cash cases, in small worlds of
+    their own (the pack flow graded, never a model's taste — the
+    offline reader ranks nothing, so every figure here is the
+    deterministic scan's and the gate's)."""
+    from decimal import Decimal as D
+
+    policy = PolicyConfig()
+    as_of = date(2026, 10, 6)
+
+    def policy_(number, amounts, broker_id=None, insured=None):
+        return Receivable(
+            policy_number=number, insured_name=insured or f"Insured {number}",
+            broker_id=broker_id, status=PolicyStatus.ACTIVE,
+            installments=[Installment(installment_id=f"{number}-I{i + 1}",
+                                       policy_number=number, sequence=i + 1,
+                                       due_date=date(2026, 10, 1), amount_due=a)
+                          for i, a in enumerate(amounts)])
+
+    def park(store, line):
+        store.add_bank_line(line)
+        store.save_suspense(SuspenseItem(
+            suspense_id=f"SUS-{line.bank_line_id}", bank_line_id=line.bank_line_id,
+            amount=line.amount, received_date=line.value_date, reason="UNIDENTIFIED"))
+        store.add_exception(ExceptionRecord(
+            exception_id=f"EXC-{line.bank_line_id}", code=ExceptionCode.UNIDENTIFIED,
+            bank_line_id=line.bank_line_id, policy_number=None, broker_id=None,
+            amount=line.amount, detail="planted unidentified cash",
+            first_seen=line.value_date))
+        return f"SUS-{line.bank_line_id}"
+
+    # Case 1: the narrative names the policy (mangled reference).
+    store = InMemoryStore()
+    store.upsert_receivable(policy_("NSP-7001", [D("2000.00"), D("2000.00")],
+                                    insured="Kestrel Point Marina"))
+    sid = park(store, BankLine(
+        bank_line_id="BL-U1", value_date=date(2026, 10, 5), amount=D("3300.00"),
+        payer_name="R G Calloway", reference=None,
+        narrative="premium for policy NSP 7001 — balance follows"))
+    scan = scan_candidates(store, OfflineReader(), sid, ASSEMBLER, as_of)
+    pack = assemble_resolution_pack(store, OfflineReader(), sid, ASSEMBLER, as_of)
+    approve_pack(store, pack.pack_id, CONTROLLER, policy,
+                 choice=scan["candidates"][0]["candidate_id"])
+    narrative_case = {
+        "candidates": len(scan["candidates"]),
+        "interpretations": [c["interpretation"] for c in scan["candidates"]],
+        "evidence": [c["evidence"] for c in scan["candidates"]],
+        "pack_prefix": pack.pack_id.split("-")[0] + "-RESOLVE-",
+        "item_status": store.suspense_items()[0].status,
+        "exception_status": store.exceptions()[0].status,
+        "nsp7001_open": str(store.receivable("NSP-7001").open_balance),
+        "quality_chosen": proposal_quality(store)["by_kind"]["resolution"]["chosen"],
+    }
+
+    # Case 2: two brokers' rates both foot; the narrative picks one.
+    def two_broker_store():
+        s = InMemoryStore()
+        s.upsert_broker(Broker(broker_id="BRK-A", name="Alder Gate Insurance Brokers",
+                               commission_rate=D("0.10")))
+        s.upsert_broker(Broker(broker_id="BRK-B", name="Birch & Vale Brokers",
+                               commission_rate=D("0.20")))
+        s.upsert_receivable(policy_("NSP-7010", [D("10000.00")], "BRK-A"))
+        s.upsert_receivable(policy_("NSP-7011", [D("11250.00")], "BRK-B"))
+        item = park(s, BankLine(
+            bank_line_id="BL-U2", value_date=date(2026, 10, 5), amount=D("9000.00"),
+            payer_name="Interstate Payments LLC", reference=None,
+            narrative="Birch & Vale remittance — premium"))
+        return s, item
+
+    store, sid = two_broker_store()
+    scan = scan_candidates(store, OfflineReader(), sid, ASSEMBLER, as_of)
+    pack = assemble_resolution_pack(store, OfflineReader(), sid, ASSEMBLER, as_of)
+    evidenced = next(c for c in scan["candidates"] if c["evidence"])
+    approve_pack(store, pack.pack_id, CONTROLLER, policy,
+                 choice=evidenced["candidate_id"])
+    quality = proposal_quality(store)["by_kind"]["resolution"]
+    disambiguated = {
+        "candidates": len(scan["candidates"]),
+        "policies": sorted(c["policy_number"] for c in scan["candidates"]),
+        "evidenced_policy": evidenced["policy_number"],
+        "wrong_broker_evidence": next(
+            c["evidence"] for c in scan["candidates"] if not c["evidence"]),
+        "nsp7011_open": str(store.receivable("NSP-7011").open_balance),
+        "nsp7010_open": str(store.receivable("NSP-7010").open_balance),
+        "quality_chosen": quality["chosen"],
+        "quality_lapsed": quality["lapsed"],
+    }
+
+    # Case 3: nothing fits, nothing is named.
+    store = InMemoryStore()
+    store.upsert_receivable(policy_("NSP-7004", [D("5000.00")]))
+    sid = park(store, BankLine(
+        bank_line_id="BL-U3", value_date=date(2026, 10, 5), amount=D("777.77"),
+        payer_name="Unknown", reference=None, narrative="premium payment"))
+    scan = scan_candidates(store, OfflineReader(), sid, ASSEMBLER, as_of)
+    refusal = ""
+    try:
+        assemble_resolution_pack(store, OfflineReader(), sid, ASSEMBLER, as_of)
+    except ResolutionError as exc:
+        refusal = str(exc)
+    no_candidate = {
+        "candidates": len(scan["candidates"]),
+        "assembly_refused": bool(refusal),
+        "refusal_names_the_gap": "no defensible candidate" in refusal,
+        "packs": len(store.packs()),
+        "item_status": store.suspense_items()[0].status,
+    }
+
+    # Case 4: the docket is rejected; the record keeps the candidates.
+    store, sid = two_broker_store()
+    pack = assemble_resolution_pack(store, OfflineReader(), sid, ASSEMBLER, as_of)
+    reject_pack(store, pack.pack_id, CONTROLLER, "not either desk's money")
+    decided = store.pack(pack.pack_id)
+    rejected_case = {
+        "candidates_on_record": len(decided.resolution.candidates),
+        "item_status": store.suspense_items()[0].status,
+        "chosen_candidate": decided.resolution.chosen_candidate,
+        "quality_rejected": proposal_quality(store)["by_kind"]["resolution"]["rejected"],
+    }
+    return {
+        "RESOLUTION-NARRATIVE": narrative_case,
+        "RESOLUTION-DISAMBIGUATED": disambiguated,
+        "RESOLUTION-NO-CANDIDATE": no_candidate,
+        "RESOLUTION-REJECTED": rejected_case,
+    }
 
 
 def returns_scenarios() -> dict[str, dict]:
@@ -1241,6 +1446,17 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 passed += 1
         elif row["kind"] == "rematch":
             observed = rematch_scenarios()[case]
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "resolution":
+            observed = resolution_scenarios()[case]
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()
