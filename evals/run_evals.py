@@ -24,7 +24,10 @@ resolved by its own narrative, an amount two brokers' rates both
 explain where only the narrative disambiguates, a wire with no
 defensible candidate at all, and a rejected docket — the scan's
 candidate set and the gate's choice graded, never a model's
-taste. The live-mode
+taste. The broker statement case reconciles the shipped example
+statement for October — one planted row of each class — against
+the pipeline's books, its counts and both footing identities
+pinned, with a tampered control total refused whole. The live-mode
 remittance-reading set is a separate runner (run_live_evals.py)
 and is deliberately not part of this gate.
 
@@ -466,6 +469,37 @@ def golden_rows() -> list[dict]:
             "digest_stable": True, "books_unchanged": True,
             "t1_attempt_stages": ["DUPLICATE_CHECK", "T1_EXACT"],
             "t1_foots": True, "t1_state": "applied",
+        },
+    })
+    rows.append({
+        # The broker's own version of October, checked against
+        # the books: the shipped example statement carries one
+        # planted row of each class (Fernway claims the new 13%
+        # retroactively on NSP-1007, overstates NSP-1047's gross,
+        # invents NSP-1099, and omits the NSP-1051 combination),
+        # and the gold pins the counts, both footing identities,
+        # and the refusal of a tampered control total.
+        "case": "BROKER-STATEMENT-OCT", "kind": "broker_statement",
+        "expect": {
+            "counts": {"AGREED": 1, "AMOUNT_DIFFERS": 1, "COMMISSION_DIFFERS": 1,
+                       "MISSING_ON_BOOKS": 1, "MISSING_ON_STATEMENT": 1},
+            "statement_total": "19061.70",
+            "books_total": "25236.90",
+            "day_split_allocated": "25236.90",
+            "statement_foots": True, "books_foots": True,
+            "foots_to_day_splits": True, "foots": True,
+            "agreed_policy": "NSP-1046",
+            "commission_policy": "NSP-1007",
+            "commission_expected": "485.10",
+            "amount_policy": "NSP-1047",
+            "amount_exception": "EXC-BL-103-OVERPAID",
+            "missing_books_policy": "NSP-1099",
+            "missing_statement_policy": "NSP-1051",
+            "suspense_policy_absent": True,
+            "tampered_refused": True,
+            "deduped": True,
+            "close_cites": True,
+            "digest_stable": True,
         },
     })
     return rows
@@ -1369,6 +1403,67 @@ def line_export_scenario() -> dict:
     }
 
 
+def broker_statement_scenario(store) -> dict:
+    """The shipped Fernway example statement for October,
+    reconciled against the pipeline's books (September and
+    October, every pack approved): one planted row of each class,
+    both footing identities, the boundary (BL-104's suspense cash
+    raises no row for NSP-1049), a tampered control total refused
+    whole, and the October close citing the summary."""
+    from pathlib import Path
+
+    from cash_recon.broker_statement import (
+        BrokerStatementError,
+        broker_reconciliation_export,
+        import_broker_statement,
+    )
+    from cash_recon.close_pack import close_pack_export
+
+    text = Path("examples/example-broker-statement.csv").read_text()
+    import_broker_statement(store, text, source_name="example-broker-statement.csv")
+    again = import_broker_statement(store, text, source_name="example-broker-statement.csv")
+    tampered_refused = False
+    try:
+        import_broker_statement(store, text.replace("19061.70", "19061.71"))
+    except BrokerStatementError:
+        tampered_refused = True
+    export = broker_reconciliation_export(store, "BRK-FERN", "2026-10", PolicyConfig())
+    export_again = broker_reconciliation_export(store, "BRK-FERN", "2026-10", PolicyConfig())
+    body = export["reconciliation"]
+    rows = {r["policy_number"]: r for r in body["rows"]}
+    totals = body["totals"]["USD"]
+    by_class = {}
+    for cls in ("AGREED", "AMOUNT_DIFFERS", "COMMISSION_DIFFERS",
+                "MISSING_ON_BOOKS", "MISSING_ON_STATEMENT"):
+        by_class[cls] = next(
+            (p for p, r in rows.items() if r["class"] == cls), None)
+    citations = close_pack_export(store, 2026, 10)["pack"].get(
+        "broker_statement_reconciliation") or []
+    return {
+        "counts": body["counts"],
+        "statement_total": totals["statement_net_total"],
+        "books_total": totals["books_net_total"],
+        "day_split_allocated": totals["day_split_allocated"],
+        "statement_foots": totals["statement_foots"],
+        "books_foots": totals["books_foots"],
+        "foots_to_day_splits": totals["foots_to_day_splits"],
+        "foots": body["foots"],
+        "agreed_policy": by_class["AGREED"],
+        "commission_policy": by_class["COMMISSION_DIFFERS"],
+        "commission_expected": rows["NSP-1007"]["books"]["expected_commission"],
+        "amount_policy": by_class["AMOUNT_DIFFERS"],
+        "amount_exception": (rows["NSP-1047"]["exception"] or {}).get("exception_id"),
+        "missing_books_policy": by_class["MISSING_ON_BOOKS"],
+        "missing_statement_policy": by_class["MISSING_ON_STATEMENT"],
+        "suspense_policy_absent": "NSP-1049" not in rows,
+        "tampered_refused": tampered_refused,
+        "deduped": again["deduped"],
+        "close_cites": len(citations) == 1 and citations[0]["counts"] == body["counts"]
+        and citations[0]["foots"] is True,
+        "digest_stable": export["sha256"] == export_again["sha256"],
+    }
+
+
 def score(rows: list[dict]) -> tuple[int, int, list[str]]:
     _ds, store, outcomes, reports, september_close, september_close_again = run_pipeline()
     packs = {p.pack_id: p for p in store.packs()}
@@ -1683,6 +1778,17 @@ def score(rows: list[dict]) -> tuple[int, int, list[str]]:
                 passed += 1
         elif row["kind"] == "combinations":
             observed = combinations_observed(store)
+            problems = [
+                f"{k} {observed.get(k)!r} != {v!r}"
+                for k, v in row["expect"].items()
+                if observed.get(k) != v
+            ]
+            if problems:
+                failures.append(f"{case}: " + "; ".join(problems))
+            else:
+                passed += 1
+        elif row["kind"] == "broker_statement":
+            observed = broker_statement_scenario(store)
             problems = [
                 f"{k} {observed.get(k)!r} != {v!r}"
                 for k, v in row["expect"].items()
