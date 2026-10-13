@@ -307,6 +307,34 @@ def test_export_is_byte_identical_and_the_text_names_the_classes():
         assert needle in text
 
 
+def test_the_api_serves_import_reconciliation_and_text():
+    from fastapi.testclient import TestClient
+
+    from cash_recon.api import Service, create_app
+    from cash_recon.llm import OfflineReader
+    from cash_recon.objects import InMemoryObjectStore
+
+    store = _mini_world()
+    service = Service(store, InMemoryObjectStore(), OfflineReader(), PolicyConfig())
+    client = TestClient(create_app(service))
+    refused = client.post("/api/broker-statements/import", json={
+        "text": STATEMENT_V1.replace("5828.00", "5828.01"), "source_name": "mini.csv"})
+    assert refused.status_code == 422 and store.broker_statements() == []
+    imported = client.post("/api/broker-statements/import", json={
+        "text": STATEMENT_V1, "source_name": "mini.csv"})
+    assert imported.status_code == 200
+    assert imported.json()["statement_id"].startswith("BSTMT-")
+    listing = client.get("/api/broker-statements").json()
+    assert len(listing) == 1 and listing[0]["standing"] is True
+    body = client.get("/api/broker-reconciliation/BRK-MINI/2026-10").json()
+    assert body["reconciliation"]["counts"]["COMMISSION_DIFFERS"] == 1
+    assert body["reconciliation"]["foots"] is True
+    text = client.get("/api/broker-reconciliation/BRK-MINI/2026-10/text")
+    assert text.status_code == 200 and "COMMISSION_DIFFERS (1)" in text.text
+    missing = client.get("/api/broker-reconciliation/BRK-MINI/2026-11")
+    assert missing.status_code == 404
+
+
 def test_sqlite_store_runs_the_whole_flow(tmp_path):
     store = SqliteStore(tmp_path / "cashrecon.db")
     _mini_world(store)
