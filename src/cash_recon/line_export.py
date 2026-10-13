@@ -392,6 +392,19 @@ def build_line_export(store: Store, bank_line_id: str) -> dict:
            "rejected pack and posts nothing until the line is re-presented."
            if np_rejected > ZERO else "")
     )
+    if foots and rejected > ZERO:
+        # The identity above is silent about the refused proposal —
+        # the rejected allocations are neither inside it nor hidden:
+        # they are named here and carried as their own term in the
+        # footing block, with the pack and its reason in the gate
+        # history. (A freed combination leg foots this way: its
+        # cash stands in the suspense term, its refused settlement
+        # in this sentence.)
+        footing_note += (
+            f" A further {as_str(rejected)} of allocations stand on rejected "
+            "pack(s) and settle nothing — a refused proposal, on the record "
+            "in the gate history above."
+        )
 
     # -- the audit trail --------------------------------------------------
     subjects = {bank_line_id, *pack_ids, *exc_ids, *susp_ids}

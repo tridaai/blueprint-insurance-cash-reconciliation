@@ -222,3 +222,75 @@ def test_proposal_quality_grades_the_combination_kind():
     quality = proposal_quality(store)
     assert quality["by_kind"]["combination"]["proposals"] == 2
     assert quality["by_kind"]["combination"]["accepted_as_proposed"] == 2
+
+
+def test_rejection_leaves_no_residue_in_the_day_reports():
+    """The footing defect this pins: rejection re-opens the legs'
+    suspense items, and if the pack's rows stayed in the
+    allocations index the same cash stood in BOTH terms of the day
+    identity — every leg day reported FOOTING FAILURE (on the
+    planted October books: bank 3,738.00 against applied 3,738.00
+    plus suspense 3,738.00 for BL-110's day) while the month close,
+    which reads pack entries and already excludes a rejected
+    combination, kept footing and hid it. A rejected combination
+    pack must leave no residue in any read model."""
+    from cash_recon.close_pack import close_pack_export
+    from cash_recon.line_export import line_export
+    from cash_recon.report import broker_scorecard, day_report
+
+    store = _gable_world()
+    policy = PolicyConfig()
+    # Proposed: the legs are held from suspense and counted in the
+    # index — both leg days foot on the strength of the proposal.
+    summary = combinations.propose_combinations(store, ASSEMBLER, date(2026, 10, 27))
+    for day in (date(2026, 10, 6), date(2026, 10, 27)):
+        assert day_report(store, day, policy)["footing_ok"] is True
+
+    gate.reject_pack(store, summary["pack_id"], CONTROLLER, "checking with the broker first")
+
+    # The index no longer claims the freed cash...
+    assert store.allocations("BL-A") == []
+    assert store.allocations("BL-B") == []
+    # ...so each leg day foots again, on the suspense term alone.
+    rep_a = day_report(store, date(2026, 10, 6), policy)
+    assert rep_a["footing_ok"] is True
+    assert rep_a["allocated_total"] == "0.00" and rep_a["suspense_total"] == "2900.00"
+    rep_b = day_report(store, date(2026, 10, 27), policy)
+    assert rep_b["footing_ok"] is True
+    assert rep_b["allocated_total"] == "0.00" and rep_b["suspense_total"] == "2560.00"
+    # The scorecard reads the same index: the broker's money stands
+    # wholly in suspense again, none of it "allocated".
+    card = {r["broker_id"]: r for r in broker_scorecard(store, date(2026, 10, 31))}
+    assert card["BRK-GABLE"]["bank_total"] == "5460.00"
+    assert card["BRK-GABLE"]["allocated_total"] == "0.00"
+    assert card["BRK-GABLE"]["suspense_total"] == "5460.00"
+    # The per-line export foots on the suspense term and NAMES the
+    # refused proposal — its own term, and a sentence in the note.
+    export = line_export(store, "BL-A")["export"]
+    assert export["footing"]["foots"] is True
+    assert export["footing"]["allocations_on_rejected_packs"] == "2900.00"
+    assert "stand on rejected pack(s) and settle nothing" in export["footing"]["note"]
+    assert export["gate_history"][0]["status"] == "rejected"
+    # The month close foots, as it did even while the days did not.
+    close = close_pack_export(store, 2026, 10)["pack"]
+    assert close["control_roll"]["footed"] is True
+    assert close["control_roll"]["closing_suspense"] == "5460.00"
+
+
+def test_reject_repropose_approve_applies_exactly_once():
+    """The freed legs are proposable again (round 7), and with the
+    rejected pack's index rows gone the re-proposal indexes the
+    pair once — approval then applies the settlement exactly
+    once, to the cent, with one index row per leg."""
+    store = _gable_world()
+    first = combinations.propose_combinations(store, ASSEMBLER, date(2026, 10, 27))
+    gate.reject_pack(store, first["pack_id"], CONTROLLER, "not yet")
+    second = combinations.propose_combinations(store, ASSEMBLER, date(2026, 10, 28))
+    assert second["pack_id"] == "PACK-COMB-2026-10-28"
+    assert len(store.allocations("BL-A")) == 1
+    gate.approve_pack(store, second["pack_id"], CONTROLLER, PolicyConfig())
+    rec = store.receivable("NSP-9001")
+    assert rec.installments[0].amount_applied == D("6000.00")
+    assert rec.open_balance == D("0.00")
+    assert len(store.allocations("BL-A")) == 1
+    assert len(store.allocations("BL-B")) == 1

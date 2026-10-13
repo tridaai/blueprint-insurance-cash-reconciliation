@@ -583,6 +583,25 @@ def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
                 item.status = "open"
                 item.resolved_on = None
                 store.save_suspense(item)
+        # The legs' cash stands in suspense again, so the pack must
+        # stop standing in the allocations index: the index is what
+        # the day report, the scorecard and the trend read as
+        # "allocated", and a cent counted in both terms of the day
+        # identity is a cent counted twice — the leg days stopped
+        # footing the moment the items re-opened over rows that
+        # still claimed them. No other rejection needs this: an
+        # ordinary or re-match pack's rejection re-opens nothing,
+        # so its rows remain the standing record of where its cash
+        # sits. The combination pack's entries stay on the pack
+        # record itself — the proposal, and its refusal, are
+        # history; only the index lets go. (Any non-combination
+        # allocations the pack carried — none, by construction —
+        # would keep their rows.)
+        store.replace_allocations(
+            [e.allocation for e in pack.entries
+             if e.allocation and not e.combination_id],
+            pack.pack_id,
+        )
     store.audit(AuditEvent(at=_now(), actor=actor, action="pack_rejected", subject=pack_id, detail=reason))
     if pack.resolution is not None:
         # The item was never touched — it stands open, as it did
