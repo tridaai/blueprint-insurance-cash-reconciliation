@@ -30,6 +30,17 @@ suspense cash, so they are reported in the pack — with the packs and
 approvers that carried them — rather than netted into the suspense
 identity where they do not belong.
 
+Return premiums get the same treatment, on their own ledger. A
+payable is money the carrier owes back, not cash it holds, so the
+pack rolls the payable ledger on its own identity — opening
+payables + opened in the month − netted against incoming cash
+− paid out under approved payout packs = closing payables — with
+each position reconstructed from the payables' own chains at the
+month boundaries, its own footed flag, and its own discrepancies.
+The only place the two ledgers ever meet is the day: cash netted
+against a payable is a named term of the day report's footing, and
+the month's netted total below is that term summed.
+
 The pack body contains no wall-clock stamps. Its SHA-256 digest is
 computed over the canonical body, so the exported JSON and the
 human-readable text rendering are two views of one record.
@@ -44,6 +55,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
+from .models import ReturnPremiumPayable
 from .money import ZERO, as_str
 from .report import BUCKETS, broker_scorecard, proposal_quality
 from .store import Store
@@ -120,6 +132,87 @@ def _positions(store: Store) -> tuple[list[_Position], dict[str, Decimal]]:
         positions.append(_Position(item, created, releases.get(item.bank_line_id, []),
                                    returned_on.get(item.bank_line_id)))
     return positions, lines
+
+
+def _payable_remaining_at(payable: ReturnPremiumPayable, cutoff: date) -> Decimal:
+    """A return-premium payable's standing at a date, reconstructed
+    from its own chain: the opened amount less every netting and
+    payout dated on or before the cutoff. A payable opened after
+    the cutoff was not owed yet and contributes nothing."""
+    if payable.opened_on > cutoff:
+        return ZERO
+    moved = sum(
+        (e.amount for e in payable.events
+         if e.kind in ("netted", "paid") and e.on <= cutoff),
+        ZERO,
+    )
+    return payable.amount - moved
+
+
+def _payable_roll(store: Store, first: date, last: date) -> dict:
+    """The payable ledger's own roll for the month: positions at the
+    boundaries reconstructed from the chains, movements from the
+    chains' dated events, and the identity checked in the open."""
+    day_before = first - timedelta(days=1)
+    payables = store.payables()
+    opening = sum((_payable_remaining_at(p, day_before) for p in payables), ZERO)
+    closing = sum((_payable_remaining_at(p, last) for p in payables), ZERO)
+    opened = sum((p.amount for p in payables if first <= p.opened_on <= last), ZERO)
+    netted = sum(
+        (e.amount for p in payables for e in p.events
+         if e.kind == "netted" and first <= e.on <= last),
+        ZERO,
+    )
+    paid = sum(
+        (e.amount for p in payables for e in p.events
+         if e.kind == "paid" and first <= e.on <= last),
+        ZERO,
+    )
+    footed = opening + opened - netted - paid == closing
+    discrepancies: list[dict] = []
+    if not footed:
+        discrepancies.append({
+            "problem": f"the payable ledger does not foot: opening {as_str(opening)} "
+                       f"+ opened {as_str(opened)} − netted {as_str(netted)} "
+                       f"− paid {as_str(paid)} != closing {as_str(closing)}",
+        })
+    payout_packs = [
+        {
+            "pack_id": p.pack_id,
+            "value_date": p.value_date.isoformat(),
+            "total": as_str(p.total),
+            "payables": len(p.entries),
+            "approvals": list(p.approvals),
+            "decided_at": p.decided_at.isoformat() if p.decided_at else None,
+        }
+        for p in sorted(store.payout_packs(), key=lambda pk: pk.pack_id)
+        if p.status.value == "approved" and first <= p.value_date <= last
+    ]
+    return {
+        "opening_payables": as_str(opening),
+        "payables_opened_in_month": as_str(opened),
+        "netted_in_month": as_str(netted),
+        "paid_in_month": as_str(paid),
+        "closing_payables": as_str(closing),
+        "footed": footed,
+        "discrepancies": discrepancies,
+        "open_payables_at_close": [
+            {
+                "payable_id": p.payable_id,
+                "policy_number": p.policy_number,
+                "payee": f"{p.payee_kind}: {p.payee_name}",
+                "remaining": as_str(_payable_remaining_at(p, last)),
+            }
+            for p in payables
+            if _payable_remaining_at(p, last) > ZERO
+        ],
+        "payout_packs_approved_in_month": payout_packs,
+        "note": (
+            "Return premiums are money owed back to insureds and brokers, not "
+            "cash held: this ledger rolls on its own identity and never "
+            "enters the suspense roll above."
+        ),
+    }
 
 
 def _aging(positions: list[_Position], as_of: date) -> list[dict]:
@@ -302,6 +395,7 @@ def build_close_pack(store: Store, year: int, month: int) -> dict:
             "footed": footed,
             "footing_note": footing_note,
         },
+        "return_premiums": _payable_roll(store, first, last),
         "payment_returns_in_month": [
             {
                 "return_id": r.return_id,
@@ -371,6 +465,34 @@ def render_close_pack_text(export: dict) -> str:
             f"allocations {pack['allocation_total']} · write-offs {pack['write_off_total']}"
             + (f" · flags: {', '.join(pack['flags'])}" if pack.get("flags") else "")
         )
+    rp = body["return_premiums"]
+    if (
+        rp["opening_payables"] != "0.00" or rp["closing_payables"] != "0.00"
+        or rp["payables_opened_in_month"] != "0.00" or rp["netted_in_month"] != "0.00"
+        or rp["paid_in_month"] != "0.00" or rp["payout_packs_approved_in_month"]
+    ):
+        out += [
+            "",
+            "RETURN PREMIUMS (payable ledger — money owed back, not cash held)",
+            f"  Opening payables:            {rp['opening_payables']:>12}",
+            f"  Opened in month:             {rp['payables_opened_in_month']:>12}",
+            f"  Netted against cash:         {rp['netted_in_month']:>12}",
+            f"  Paid out (approved packs):   {rp['paid_in_month']:>12}",
+            f"  Closing payables:            {rp['closing_payables']:>12}",
+            "  The payable ledger FOOTS on its own identity."
+            if rp["footed"] else "  The payable ledger does NOT FOOT — see discrepancies.",
+        ]
+        for od in rp["open_payables_at_close"]:
+            out.append(
+                f"    {od['payable_id']} · {od['policy_number']} · owed to "
+                f"{od['payee']} · {od['remaining']:>10} still standing"
+            )
+        for pp in rp["payout_packs_approved_in_month"]:
+            out.append(
+                f"    Payout pack {pp['pack_id']} · value {pp['value_date']} · "
+                f"{pp['total']:>10} across {pp['payables']} payable(s) · approved by "
+                f"{', '.join(pp['approvals'])}"
+            )
     if body["payment_returns_in_month"]:
         out += ["", f"PAYMENT RETURNS IN THE MONTH ({len(body['payment_returns_in_month'])})"]
         for r in body["payment_returns_in_month"]:

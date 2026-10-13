@@ -129,3 +129,54 @@ def test_close_pack_over_http(client):
     text = client.get("/api/close/2026-09/text")
     assert text.status_code == 200 and "MONTH-END CLOSE PACK — 2026-09" in text.text
     assert client.get("/api/close/2026-13").status_code == 400
+
+
+def test_september_close_carries_a_zero_payable_section(world):
+    store = _september(world)
+    export = close_pack_export(store, 2026, 9)
+    rp = export["pack"]["return_premiums"]
+    assert rp["opening_payables"] == "0.00" and rp["closing_payables"] == "0.00"
+    assert rp["footed"] is True and rp["discrepancies"] == []
+    # No payable activity: the text rendering stays as it was.
+    assert "RETURN PREMIUMS" not in render_close_pack_text(export)
+
+
+def test_the_payable_ledger_rolls_on_its_own_identity():
+    from cash_recon.models import PayableEvent, ReturnPremiumPayable
+    from cash_recon.money import ZERO as _ZERO
+    from cash_recon.store import InMemoryStore
+
+    store = InMemoryStore()
+
+    def payable(pid, policy, opened_on, amount, moves):
+        events = [PayableEvent(on=opened_on, kind="opened", amount=amount, ref="CXL")]
+        events += [PayableEvent(on=d, kind=k, amount=a, ref="X") for d, k, a in moves]
+        return ReturnPremiumPayable(
+            payable_id=pid, policy_number=policy, cancellation_id="CXL",
+            payee_kind="insured", payee_name="Insured", broker_id=None, amount=amount,
+            amount_netted=sum((a for _d, k, a in moves if k == "netted"), _ZERO),
+            amount_paid=sum((a for _d, k, a in moves if k == "paid"), _ZERO),
+            status="paid", opened_on=opened_on, events=events,
+        )
+
+    store.save_payable(payable("PAY-A", "NSP-A", date(2026, 11, 1), Decimal("5966.85"),
+                               [(date(2026, 12, 5), "paid", Decimal("5966.85"))]))
+    store.save_payable(payable("PAY-B", "NSP-B", date(2026, 12, 1), Decimal("3008.22"),
+                               [(date(2026, 12, 3), "netted", Decimal("3000.00")),
+                                (date(2026, 12, 4), "paid", Decimal("8.22"))]))
+    december = close_pack_export(store, 2026, 12)["pack"]
+    rp = december["return_premiums"]
+    assert rp["opening_payables"] == "5966.85"      # November's payable, still standing
+    assert rp["payables_opened_in_month"] == "3008.22"
+    assert rp["netted_in_month"] == "3000.00"
+    assert rp["paid_in_month"] == "5975.07"
+    assert rp["closing_payables"] == "0.00"
+    assert rp["footed"] is True and rp["open_payables_at_close"] == []
+    # The suspense roll is untouched by any of it.
+    assert december["control_roll"]["closing_suspense"] == "0.00"
+    november = close_pack_export(store, 2026, 11)["pack"]["return_premiums"]
+    assert november["opening_payables"] == "0.00"
+    assert november["closing_payables"] == "5966.85"
+    text = render_close_pack_text(close_pack_export(store, 2026, 12))
+    assert "RETURN PREMIUMS (payable ledger" in text
+    assert "The payable ledger FOOTS" in text
