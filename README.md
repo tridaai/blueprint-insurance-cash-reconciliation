@@ -67,7 +67,7 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (67 cases, gold by construction)
+make evals       # the golden-case gate (68 cases, gold by construction)
 make evals-live  # the live reading set — needs a provider key (SKIPPED-LIVE without one)
 make serve       # API + console on http://localhost:8000
 make prod-smoke  # prove the production profile against real PostgreSQL + S3 (env required)
@@ -198,6 +198,72 @@ rate it was matched under, later cash nets at the new rate, and a
 wire netted at a superseded rate is judged against the rate in
 force, not the one the broker used.
 
+## Multi-currency cash application
+
+Northgate bills in more than one currency, and the second currency
+(November's book: a broker whose policies are billed in EUR, with
+one USD policy alongside) is handled the way a cash desk actually
+handles it — in currency first, converted only on paper:
+
+- **Matching is in currency.** Every record names its denomination
+  (ISO code): bank lines, receivables and installments, suspense
+  items, exceptions, returns. A line is worked only against open
+  items denominated in the line's own currency — exact, netting
+  (the broker's commission applies in that currency), remittance
+  lines, and lump-sum candidates alike. A combination pair must
+  share one currency with its target, and the duplicate fingerprint
+  includes currency: the same number in another currency is
+  different money, not a duplicate.
+- **Cross-currency settlement is refused by design.** Cash is never
+  converted to hunt a match. A wire citing a policy billed in
+  another currency — even for exactly the amount that would settle
+  it in that currency — raises the new **`CURRENCY_NO_OPEN_ITEMS`**
+  exception and sits in suspense in its own denomination, as does
+  an unexplained wire whose broker holds open items only in other
+  currencies. A lump-sum proposal naming another currency's item is
+  refused whole.
+- **Conversion is a recording act, in code, at governed rates.**
+  The FX table (`config.py`, in the broker-rate-history mould)
+  holds rates by effective period — EUR 1.08, changing to 1.10
+  mid-November — quoted as functional (USD) units per unit of
+  currency. When an allocation is created for a foreign-currency
+  line, the conversion is computed at the rate in force on the
+  line's value date, rounded half-up at that one point, and **all
+  three figures are recorded on the allocation**: the cash amount,
+  the rate used, and the functional amount. The per-line audit
+  export and the posting file both show all three.
+- **Recorded conversions are never re-priced.** A gate edit that
+  moves the cash re-derives the functional amount at the recorded
+  rate. A returned foreign-currency line is reversed in its own
+  currency by the ordinary replay — which works in billed terms —
+  so its recorded conversion stands as recorded, even when the
+  return is recorded after the rate has moved. A re-send is new
+  cash and converts at its own date's rate.
+- **Suspense and reports keep denominations apart.** Suspense
+  items hold their currency and the aging reports totals per
+  currency — EUR is never added to USD. The day report foots **per
+  currency** and adds a functional (USD) translation of the day
+  with the rates used named. The close pack's suspense identity
+  holds per currency (its headline roll is the functional
+  currency's), and the pack also shows functional equivalents of
+  closing suspense at month-end rates, labelled as translations,
+  not postings. The broker scorecard and the trend watch keep
+  per-currency figures separate and compute no blended rates.
+
+November's planted proofs, gold by construction: an EUR exact
+match; an EUR installment plan netted on either side of the FX
+change, each line converting at its own date's rate; the first of
+those lines returned after the move and re-sent (the reversal at
+the recorded rate, the re-send at the new one); an EUR wire citing
+the broker's USD policy and a USD wire citing the EUR plan for
+exactly its net due — both `CURRENCY_NO_OPEN_ITEMS`, settling
+nothing — and the USD policy then settled properly in USD.
+November's close foots per currency: USD opening 85,077.74
+(October's closing, the continuity control) + 9,000.00 received =
+94,077.74 closing; EUR opening 0.00 + 4,500.00 received = 4,500.00
+closing, with the EUR balance translating to 4,950.00 at the
+month-end rate of 1.10.
+
 ## Combination settlements
 
 The tiers work one bank line at a time, and a payer who settles a
@@ -306,7 +372,9 @@ ships at `data/example-statement.csv`.
 Each carries a reason code, the amount at issue, and an aging clock:
 `UNIDENTIFIED`, `PARTIAL`, `OVERPAID`, `NETTING_MISMATCH`,
 `REMITTANCE_ARITHMETIC`, `UNKNOWN_POLICY`, `CANCELLED_POLICY`,
-`DUPLICATE_PAYMENT`, and `STALE_SUSPENSE` for unapplied cash past the
+`DUPLICATE_PAYMENT`, `CURRENCY_NO_OPEN_ITEMS` (the payer has
+nothing open in the currency the cash arrived in — see
+*Multi-currency cash application*), and `STALE_SUSPENSE` for unapplied cash past the
 configured age. For a netting mismatch the system drafts the broker
 query note — what was expected, what arrived, the delta. Drafted,
 never sent.
@@ -440,7 +508,12 @@ by bank line — never folded silently into the day's allocations.
 Returns recorded on the day stand on the report as their own
 control line — count and total — and the day a returned line was
 received restates its allocations net of the return, beside the
-gross figures, neither netted away silently.
+gross figures, neither netted away silently. On a day that takes
+more than one currency, the report foots **per currency** — each
+currency's bank total against its own applied, netted, suspense,
+and non-premium — and carries a functional (USD) translation of
+the day with the governed rates used named; the translation is a
+reporting conversion, never the control.
 
 ## The day-open checklist
 
@@ -502,7 +575,12 @@ payables are money owed back, not cash held. Export is one JSON plus a human-rea
 text rendering of the same body, with a SHA-256 digest over it —
 the body carries no wall-clock stamps, so a pack regenerated from
 unchanged books is byte-identical. Assembling the pack changes
-nothing: closing a month here is a report, not a lock.
+nothing: closing a month here is a report, not a lock. On a book
+holding more than one currency the suspense roll runs **per
+currency** — the identity holds in each denomination, the headline
+roll is the functional currency's — and the pack carries
+functional equivalents of the closing suspense at month-end
+governed rates, labelled as translations, not postings.
 
 ## The broker scorecard
 
@@ -597,7 +675,7 @@ system being awake.
 ## Evals
 
 `make evals` runs the synthetic months through the real pipeline and
-scores 67 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 68 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
@@ -637,7 +715,14 @@ unproposed), and the non-premium cases (the interest credit, the
 own-account transfer and the fee rebate each classified to the
 right sub-kind, standing in approved disposition packs, with no
 suspense item and no allocation; the lookalike premium payment
-settling as ordinary T1 premium). The runner prints a
+settling as ordinary T1 premium), and the multi-currency case
+(November in its own store, so the trend watch keeps comparing
+September and October: the EUR exact and netting matches with
+their recorded conversions at each date's rate, the return after
+the FX move reversing at the recorded rate and the re-send
+converting at the new one, both cross-currency wires settling
+nothing under CURRENCY_NO_OPEN_ITEMS, the per-currency day
+sections and close rolls, and the month-end translations). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
@@ -678,8 +763,9 @@ stubbed transports, and this set is what a first live run grades.
 src/cash_recon/
   models.py      the records: brokers, receivables, bank lines, packs
   money.py       Decimal money, the one rounding point
-  config.py      policy thresholds (auto-apply, write-off limit, stale age) + the trend watch's tolerances + the non-premium rules
-  dataset.py     the synthetic Northgate months (September + October), gold by construction
+  config.py      policy thresholds (auto-apply, write-off limit, stale age) + the trend watch's tolerances + the non-premium rules + the governed FX rate table
+  fx.py          foreign exchange: rates priced by date, conversion in code (functional amounts recorded, never re-priced)
+  dataset.py     the synthetic Northgate months (September + October, and November's second-currency book), gold by construction
   matcher.py     the five tiers, in code, with the footing assertion
   combinations.py  the combination pass: same-payer wire pairs that settle one bill exactly
   nonpremium.py  the non-premium classifier + disposition packs + the ledger view

@@ -112,6 +112,36 @@ headline `commission_rate` remains as the current rate (and the
 answer for a record with no history), set to the newest period's
 rate whenever a history is booked.
 
+**Currency is a denomination, not a conversion problem.** Every
+money record carries the ISO currency its amount is denominated in
+(bank lines, receivables and installments, allocations, suspense
+items, exceptions, returns; a key column in both store dialects,
+migration 0005, beside the payload). The matcher is currency-first:
+a line is worked only against open items in its own currency —
+tiers, remittance lines, attribution, lump-sum candidates, and
+combination pairs alike — because a converted figure that foots is
+still the wrong settlement. Where the payer has nothing open in
+the line's currency, the outcome is the `CURRENCY_NO_OPEN_ITEMS`
+exception and suspense in the line's own denomination; the model
+is never asked, because there is no judgment to make. Conversion
+exists for exactly two purposes, both in `fx.py` over the governed
+table in `config.py` (`FX_RATE_HISTORY`, dated periods in the
+broker-rate mould, `rate_on` the single read): *recording* — when
+an allocation is created, the functional amount is computed at the
+rate in force on the bank line's value date, rounded half-up at
+that one point, and stored on the allocation with the rate, where
+it is never recomputed (a gate edit re-derives it at the recorded
+rate; a return's reversal replays billed terms in the line's own
+currency, so the recorded conversion stands untouched even after
+the rate moves) — and *presentation* — day reports and close packs
+translate positions into the functional currency at named rates,
+labelled as translations. Controls never run on translated
+figures: the day footing and the close pack's suspense identity
+are computed per currency, in the currency, and the close pack's
+headline roll is simply the functional currency's own roll.
+Suspense aging, the scorecard, and the trend watch likewise keep
+per-currency figures and compute no blended rates.
+
 **A lump sum never crosses brokers.** Candidates for the proposers
 are built from the paying broker's open items only, and both
 readers validate proposals against that list — but the rule also
