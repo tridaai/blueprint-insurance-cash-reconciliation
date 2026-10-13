@@ -106,7 +106,29 @@ def main() -> None:
     rej.add_argument("--reason", required=True)
     pfile = sub.add_parser("payout-file", help="print an approved payout pack's payout file (CSV)")
     pfile.add_argument("pack_id")
+    ck = sub.add_parser("checkpoints", help="the LangGraph checkpoint store: governed retention")
+    cksub = ck.add_subparsers(dest="checkpoints_command", required=True)
+    prn = cksub.add_parser("prune", help="prune checkpoints beyond the retention policy (config: CHECKPOINT_KEEP_PER_THREAD / CHECKPOINT_MAX_AGE_DAYS)")
+    prn.add_argument("--keep", type=int, default=None, help="checkpoints to keep per thread (default: the policy's)")
+    prn.add_argument("--max-age-days", type=int, default=None, help="age beyond which kept checkpoints go too — never a thread's newest (default: the policy's)")
+    prn.add_argument("--dry-run", action="store_true", help="count what would be pruned; delete nothing")
     args = parser.parse_args()
+
+    if args.command == "checkpoints":
+        import dataclasses
+
+        from .checkpoints import prune_checkpoints
+
+        ck_policy = PolicyConfig.from_env()
+        overrides = {}
+        if args.keep is not None:
+            overrides["checkpoint_keep_per_thread"] = args.keep
+        if args.max_age_days is not None:
+            overrides["checkpoint_max_age_days"] = args.max_age_days
+        if overrides:
+            ck_policy = dataclasses.replace(ck_policy, **overrides)
+        print(json.dumps(prune_checkpoints(ck_policy, dry_run=args.dry_run), indent=2))
+        return
 
     store, objects = make_store(), make_object_store()
     policy = PolicyConfig.from_env()

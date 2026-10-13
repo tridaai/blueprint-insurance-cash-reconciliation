@@ -22,6 +22,19 @@ class Policy:
     stale_suspense_days: int = 30
     netting_tolerance: Decimal = Decimal("0.01")
     duplicate_window_days: int = 5
+    # Checkpoint retention (checkpoints.py): the day-run graph writes
+    # LangGraph checkpoints on every run, and the saver's tables grow
+    # without bound if nobody prunes them. The governed shape: keep
+    # the newest `checkpoint_keep_per_thread` checkpoints of every
+    # thread, and let anything older than `checkpoint_max_age_days`
+    # go even inside that window — except a thread's single newest
+    # checkpoint, which is never pruned, so the latest state of
+    # every thread always still loads. Pruning itself is an explicit
+    # operator act (`cash-recon checkpoints prune`), never automatic;
+    # CHECKPOINT_PRUNE_ON_STARTUP=1 opts a deployment into one prune
+    # at API startup.
+    checkpoint_keep_per_thread: int = 50
+    checkpoint_max_age_days: int = 30
 
     @classmethod
     def from_env(cls) -> "Policy":
@@ -42,6 +55,12 @@ class Policy:
             netting_tolerance=dec("NETTING_TOLERANCE", cls.netting_tolerance),
             duplicate_window_days=num(
                 "DUPLICATE_WINDOW_DAYS", cls.duplicate_window_days
+            ),
+            checkpoint_keep_per_thread=num(
+                "CHECKPOINT_KEEP_PER_THREAD", cls.checkpoint_keep_per_thread
+            ),
+            checkpoint_max_age_days=num(
+                "CHECKPOINT_MAX_AGE_DAYS", cls.checkpoint_max_age_days
             ),
         )
 

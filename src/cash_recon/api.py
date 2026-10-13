@@ -127,6 +127,22 @@ class Service:
         self.policy = policy
 
 
+def _maybe_prune_checkpoints_on_startup(policy: PolicyConfig) -> None:
+    """One checkpoint prune at startup — only when the deployment
+    opts in with CHECKPOINT_PRUNE_ON_STARTUP=1. Pruning is an
+    operator's decision, never a silent side effect: the default
+    is off, the act is logged with its counts, and a failure is a
+    warning, never a reason the desk cannot start."""
+    if os.environ.get("CHECKPOINT_PRUNE_ON_STARTUP", "").lower() not in ("1", "true", "yes"):
+        return
+    try:
+        from .checkpoints import prune_checkpoints
+
+        log.info("checkpoint prune on startup: %s", prune_checkpoints(policy))
+    except Exception:
+        log.warning("checkpoint prune on startup failed; continuing without it", exc_info=True)
+
+
 def create_app(service: Service | None = None) -> FastAPI:
     configure_logging()
     svc = service
@@ -135,6 +151,7 @@ def create_app(service: Service | None = None) -> FastAPI:
         nonlocal svc
         if svc is None:
             svc = Service(make_store(), make_object_store(), make_reader(), PolicyConfig.from_env())
+            _maybe_prune_checkpoints_on_startup(svc.policy)
         return svc
 
     app = FastAPI(title="Insurance Cash Reconciliation Agent — Trida AI Blueprint")
