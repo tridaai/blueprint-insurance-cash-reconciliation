@@ -397,15 +397,38 @@ class PostingPack(BaseModel):
         )
 
 
+class ReturnUnwind(BaseModel):
+    """One allocation's reversal inside a payment return: the cash
+    taken back from that allocation and the gross (billed) amount
+    it re-opened. Recorded per allocation, so a later return of
+    the same line knows exactly what application still stands —
+    the unwind is replayed from the gate's own arithmetic, never
+    re-priced at a later rate."""
+
+    pack_id: str
+    policy_number: str
+    installment_id: str
+    cash: Decimal
+    gross: Decimal
+
+
 class PaymentReturn(BaseModel):
     """A bank return advice worked against an applied bank line.
 
-    The bank took the money back (a bounced debit, a recalled wire,
-    a dishonoured cheque). The return is its own record — the
+    The bank took money back (a bounced debit, a recalled wire, a
+    dishonoured cheque). The return is its own record — the
     original application is never edited away; the reversal is
     derived from it and chained to it here and on the audit trail.
-    Full-line returns only: the bank returning part of a line is
-    refused at recording time, in words, not modelled as a state.
+
+    A return may be for part of the line — banks claw back what
+    they claw back, and the rest of the application stands. The
+    returned amount unwinds the line's cash in a fixed order:
+    suspense the line still holds first (cash that never settled
+    anything), then its allocations in the reverse of the order
+    they were applied, each to the cent. A line can be returned
+    more than once, until its returns sum to the line amount —
+    and never beyond it; the excess is refused at recording time,
+    in words.
     """
 
     return_id: str
@@ -413,10 +436,40 @@ class PaymentReturn(BaseModel):
     reason: ReturnReason
     return_date: date
     recorded_by: str
-    amount: Decimal  # the full bank-line amount, always
+    amount: Decimal  # what this return took back (the full line when partial is False and it is the line's only return)
     currency: str = "USD"  # the original line's currency — the reversal is in that currency, at its recorded rates
     pack_ids: list[str] = Field(default_factory=list)  # approved packs that carried the line
     detail: str = ""
+    # Part-return bookkeeping. Defaults keep records written
+    # before part-returns existed valid and read exactly as they
+    # were read then: a legacy record is a full return with no
+    # unwind list, and suspense_released None means "the whole
+    # remaining suspense position" — the close pack reconstructs
+    # it that way, never from a stored guess.
+    partial: bool = False  # this return left some of the line standing
+    cumulative_returned: Decimal | None = None  # the line's returns including this one; None on legacy records
+    suspense_released: Decimal | None = None  # this return's suspense share; None on legacy records
+    unwind: list[ReturnUnwind] = Field(default_factory=list)
+
+
+class DayClaim(BaseModel):
+    """The store-level claim on one day's run: the atomic record
+    that makes "a day runs once" true across processes, where the
+    audit-trail guard alone was read-then-write. The first starter
+    inserts the claim and wins it; a second starter — even while
+    the first is still running — finds the claim standing and is
+    refused, naming it. A completed run's claim is the day's
+    standing record. An interrupted attempt's claim is
+    reclaimable only by the sanctioned recovery run, which proves
+    the prior attempt interrupted on the trail, and no longer
+    holding the day's run lock, before it takes the claim over."""
+
+    day: date
+    attempt: int
+    actor: str
+    claimed_at: datetime
+    state: str = "running"  # running | completed
+    thread_id: str = ""
 
 
 class Cancellation(BaseModel):

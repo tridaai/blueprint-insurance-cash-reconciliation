@@ -27,6 +27,18 @@ dimensions (documents.py; the Postgres column is `vector(384)`).
 and raises `EmbeddingDimensionError` — the JSON-backed stores check
 too, so a wrong-dimension vector fails the same deliberate way
 everywhere, not only where pgvector happens to reject it.
+
+Day runs carry one contract too: `claim_day` wins a day atomically
+(the day_claims table, migration 0006 — insert-or-fail on the day
+key), `reclaim_day` takes an interrupted attempt's claim over by
+compare-and-swap on (day, attempt, state='running') and on no
+other terms, and the per-day run lock (`try_day_lock` /
+`release_day_lock`) is held by the attempt that is actually
+running — a Postgres advisory lock on a dedicated connection, an
+flock on a file beside the SQLite database, a threading lock in
+memory — so a starter can tell a live attempt from a dead one:
+the lock frees itself when the holder's process dies, while the
+claim record stays as the day's standing history.
 """
 
 from __future__ import annotations
@@ -50,6 +62,7 @@ from .models import (
     BankLine,
     Broker,
     Cancellation,
+    DayClaim,
     ExceptionRecord,
     PaymentReturn,
     PayoutPack,
@@ -123,6 +136,13 @@ class Store(Protocol):
     def add_return(self, ret: PaymentReturn) -> None: ...
     def returns(self, on: date | None = None) -> list[PaymentReturn]: ...
     def return_for_line(self, bank_line_id: str) -> PaymentReturn | None: ...
+    def returns_for_line(self, bank_line_id: str) -> list[PaymentReturn]: ...
+    def claim_day(self, claim: DayClaim) -> bool: ...
+    def day_claim(self, day: date) -> DayClaim | None: ...
+    def reclaim_day(self, claim: DayClaim, from_attempt: int) -> bool: ...
+    def save_day_claim(self, claim: DayClaim) -> None: ...
+    def try_day_lock(self, day: date) -> bool: ...
+    def release_day_lock(self, day: date) -> None: ...
     def add_remittance(self, rem: Remittance) -> None: ...
     def save_remittance(self, rem: Remittance) -> None: ...
     def remittances(self, on: date | None = None) -> list[Remittance]: ...
@@ -175,6 +195,9 @@ class InMemoryStore:
         self._payables: dict[str, ReturnPremiumPayable] = {}
         self._payout_packs: dict[str, PayoutPack] = {}
         self._audit: list[AuditEvent] = []
+        self._day_claims: dict[date, DayClaim] = {}
+        self._claim_guard = threading.Lock()
+        self._day_locks: dict[date, threading.Lock] = {}
 
     # -- reference data -------------------------------------------------
     def upsert_broker(self, broker):
@@ -214,10 +237,50 @@ class InMemoryStore:
         return [r for r in rows if on is None or r.return_date == on]
 
     def return_for_line(self, bank_line_id):
-        for ret in self._returns.values():
-            if ret.bank_line_id == bank_line_id:
-                return copy.deepcopy(ret)
-        return None
+        rows = self.returns_for_line(bank_line_id)
+        return rows[0] if rows else None
+
+    def returns_for_line(self, bank_line_id):
+        return [r for r in self.returns() if r.bank_line_id == bank_line_id]
+
+    # -- day claims & run locks -----------------------------------------
+    def claim_day(self, claim):
+        with self._claim_guard:
+            if claim.day in self._day_claims:
+                return False
+            self._day_claims[claim.day] = copy.deepcopy(claim)
+            return True
+
+    def day_claim(self, day):
+        with self._claim_guard:
+            return copy.deepcopy(self._day_claims.get(day))
+
+    def reclaim_day(self, claim, from_attempt):
+        with self._claim_guard:
+            existing = self._day_claims.get(claim.day)
+            if (
+                existing is None
+                or existing.attempt != from_attempt
+                or existing.state != "running"
+            ):
+                return False
+            self._day_claims[claim.day] = copy.deepcopy(claim)
+            return True
+
+    def save_day_claim(self, claim):
+        with self._claim_guard:
+            self._day_claims[claim.day] = copy.deepcopy(claim)
+
+    def try_day_lock(self, day):
+        with self._claim_guard:
+            lock = self._day_locks.setdefault(day, threading.Lock())
+        return lock.acquire(blocking=False)
+
+    def release_day_lock(self, day):
+        with self._claim_guard:
+            lock = self._day_locks.get(day)
+        if lock is not None and lock.locked():
+            lock.release()
 
     def add_remittance(self, rem):
         self._remittances[rem.remittance_id] = copy.deepcopy(rem)
@@ -368,7 +431,15 @@ class PostgresStore:
 
         self._psycopg = psycopg
         self._dict_row = dict_row
+        self._dsn = dsn
         self.conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        # The day-run lock lives on its own connection: an advisory
+        # lock is session-scoped, so it must not ride the connection
+        # the run's ordinary work uses — and when this process dies,
+        # the session ends and the lock frees itself.
+        self._lock_conn = None
+        self._held_day_locks: set[str] = set()
+        self._lock_guard = threading.Lock()
         base = Path(migrations_dir) if migrations_dir else _default_migrations_dir()
         self._migrate(base)
 
@@ -467,10 +538,82 @@ class PostgresStore:
         return [PaymentReturn.model_validate(r["payload"]) for r in rows]
 
     def return_for_line(self, bank_line_id):
-        row = self._one(
-            "SELECT payload FROM payment_returns WHERE bank_line_id = %s", (bank_line_id,)
+        rows = self.returns_for_line(bank_line_id)
+        return rows[0] if rows else None
+
+    def returns_for_line(self, bank_line_id):
+        rows = self._all(
+            "SELECT payload FROM payment_returns WHERE bank_line_id = %s "
+            "ORDER BY return_date, return_id",
+            (bank_line_id,),
         )
-        return PaymentReturn.model_validate(row["payload"]) if row else None
+        return [PaymentReturn.model_validate(r["payload"]) for r in rows]
+
+    # -- day claims & run locks -----------------------------------------
+    def claim_day(self, claim):
+        row = self._one(
+            "INSERT INTO day_claims (day, attempt, actor, state, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (day) DO NOTHING RETURNING day",
+            (claim.day, claim.attempt, claim.actor, claim.state, dump(claim)),
+        )
+        return row is not None
+
+    def day_claim(self, day):
+        row = self._one("SELECT payload FROM day_claims WHERE day = %s", (day,))
+        return DayClaim.model_validate(row["payload"]) if row else None
+
+    def reclaim_day(self, claim, from_attempt):
+        row = self._one(
+            "UPDATE day_claims SET attempt = %s, actor = %s, state = %s, payload = %s "
+            "WHERE day = %s AND attempt = %s AND state = 'running' RETURNING day",
+            (claim.attempt, claim.actor, claim.state, dump(claim),
+             claim.day, from_attempt),
+        )
+        return row is not None
+
+    def save_day_claim(self, claim):
+        self._put(
+            "INSERT INTO day_claims (day, attempt, actor, state, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (day) DO UPDATE SET "
+            "attempt = EXCLUDED.attempt, actor = EXCLUDED.actor, "
+            "state = EXCLUDED.state, payload = EXCLUDED.payload",
+            (claim.day, claim.attempt, claim.actor, claim.state, dump(claim)),
+        )
+
+    def _advisory_conn(self):
+        if self._lock_conn is None or self._lock_conn.closed:
+            self._lock_conn = self._psycopg.connect(self._dsn, autocommit=True)
+        return self._lock_conn
+
+    def try_day_lock(self, day):
+        key = day.isoformat()
+        with self._lock_guard:
+            if key in self._held_day_locks:
+                return False
+            row = self._advisory_conn().execute(
+                "SELECT pg_try_advisory_lock(hashtext(%s))",
+                (f"cashrecon-day-{key}",),
+            ).fetchone()
+            if row and row[0]:
+                self._held_day_locks.add(key)
+                return True
+            return False
+
+    def release_day_lock(self, day):
+        key = day.isoformat()
+        with self._lock_guard:
+            if key not in self._held_day_locks:
+                return
+            self._held_day_locks.discard(key)
+            try:
+                self._advisory_conn().execute(
+                    "SELECT pg_advisory_unlock(hashtext(%s))",
+                    (f"cashrecon-day-{key}",),
+                )
+            except Exception:
+                # The unlock is best-effort: if the connection is
+                # gone, the session ended and the lock went with it.
+                pass
 
     def add_remittance(self, rem):
         self._put(
@@ -705,6 +848,7 @@ class SqliteStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._day_lock_fds: dict[str, int] = {}
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         base = Path(migrations_dir) if migrations_dir else _default_migrations_dir("sqlite")
@@ -817,10 +961,87 @@ class SqliteStore:
         return [PaymentReturn.model_validate(self._payload(r)) for r in rows]
 
     def return_for_line(self, bank_line_id):
-        row = self._one(
-            "SELECT payload FROM payment_returns WHERE bank_line_id = ?", (bank_line_id,)
+        rows = self.returns_for_line(bank_line_id)
+        return rows[0] if rows else None
+
+    def returns_for_line(self, bank_line_id):
+        rows = self._all(
+            "SELECT payload FROM payment_returns WHERE bank_line_id = ? "
+            "ORDER BY return_date, return_id",
+            (bank_line_id,),
         )
-        return PaymentReturn.model_validate(self._payload(row)) if row else None
+        return [PaymentReturn.model_validate(self._payload(r)) for r in rows]
+
+    # -- day claims & run locks -----------------------------------------
+    def claim_day(self, claim):
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO day_claims (day, attempt, actor, state, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (claim.day.isoformat(), claim.attempt, claim.actor,
+                 claim.state, dump(claim)),
+            )
+            self.conn.commit()
+            return cur.rowcount == 1
+
+    def day_claim(self, day):
+        row = self._one(
+            "SELECT payload FROM day_claims WHERE day = ?", (day.isoformat(),)
+        )
+        return DayClaim.model_validate(self._payload(row)) if row else None
+
+    def reclaim_day(self, claim, from_attempt):
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE day_claims SET attempt = ?, actor = ?, state = ?, payload = ? "
+                "WHERE day = ? AND attempt = ? AND state = 'running'",
+                (claim.attempt, claim.actor, claim.state, dump(claim),
+                 claim.day.isoformat(), from_attempt),
+            )
+            self.conn.commit()
+            return cur.rowcount == 1
+
+    def save_day_claim(self, claim):
+        self._put(
+            "INSERT INTO day_claims (day, attempt, actor, state, payload) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (day) DO UPDATE SET "
+            "attempt = excluded.attempt, actor = excluded.actor, "
+            "state = excluded.state, payload = excluded.payload",
+            (claim.day.isoformat(), claim.attempt, claim.actor,
+             claim.state, dump(claim)),
+        )
+
+    def _day_lock_path(self, day) -> Path:
+        return self.path.parent / f"{self.path.name}.daylock-{day.isoformat()}"
+
+    def try_day_lock(self, day):
+        import fcntl
+
+        key = day.isoformat()
+        with self._lock:
+            if key in self._day_lock_fds:
+                return False
+            fd = os.open(self._day_lock_path(day), os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                return False
+            self._day_lock_fds[key] = fd
+            return True
+
+    def release_day_lock(self, day):
+        import fcntl
+
+        key = day.isoformat()
+        with self._lock:
+            fd = self._day_lock_fds.pop(key, None)
+            if fd is None:
+                return
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
     def add_remittance(self, rem):
         self._put(

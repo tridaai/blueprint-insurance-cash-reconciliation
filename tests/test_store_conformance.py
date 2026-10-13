@@ -13,7 +13,7 @@ import hashlib
 import os
 import sqlite3
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,6 +28,7 @@ from cash_recon.models import (
     AuditEvent,
     BankLine,
     Cancellation,
+    DayClaim,
     ExceptionCode,
     ExceptionRecord,
     PayableEvent,
@@ -184,6 +185,25 @@ def battery(store, tag: str = "") -> None:
     mine = [r for r in store.returns() if r.return_id == ret.return_id]
     assert mine and isinstance(mine[0].amount, Decimal)
 
+    # A line's returns, in order: part-returns (round 11) mean a
+    # line can carry more than one return record, and
+    # return_for_line stays the first of them on every store.
+    ret2 = PaymentReturn(
+        return_id=f"RET-{tag}BATTERY-2", bank_line_id="BL-001", reason=ReturnReason.NSF,
+        return_date=date(2026, 9, 5), recorded_by="battery", amount=D("100.00"),
+        partial=True,
+    )
+    store.add_return(ret2)
+    # The Postgres leg shares one database across runs, so the
+    # line's full list accumulates earlier runs' records: this
+    # run's pair, in order, is what the semantics pin.
+    pair = [r.return_id for r in store.returns_for_line("BL-001")
+            if r.return_id in (ret.return_id, ret2.return_id)]
+    assert pair == [ret.return_id, ret2.return_id]
+    assert store.return_for_line("BL-001").return_id == \
+        store.returns_for_line("BL-001")[0].return_id
+    assert store.returns_for_line("BL-002") == []
+
     # Return premiums: the cancellation, its payable (saved, moved,
     # re-read with its chain intact), and a payout pack.
     cxl = Cancellation(
@@ -239,6 +259,46 @@ def battery(store, tag: str = "") -> None:
     assert [e.action for e in store.audit_events(f"{tag}S2")] == ["two"]
     assert isinstance(tagged[0].at, datetime)
 
+    # Day claims (migration 0006): the first starter wins the day
+    # atomically, on every store. The scratch day is far outside
+    # the dataset; the Postgres leg shares one database across
+    # runs, so its day is derived from the run's tag.
+    claim_day = date(2031, 1, 1) + timedelta(days=(int(tag, 16) % 2000) if tag else 0)
+    first = DayClaim(day=claim_day, attempt=1, actor="battery-one",
+                     claimed_at=datetime(2031, 1, 1, tzinfo=timezone.utc),
+                     state="running", thread_id=f"day-{claim_day.isoformat()}-a1")
+    assert store.claim_day(first) is True
+    assert store.claim_day(first.model_copy(update={"actor": "battery-two"})) is False
+    standing = store.day_claim(claim_day)
+    assert standing is not None and standing.actor == "battery-one"
+    assert standing.attempt == 1 and standing.state == "running"
+    assert standing.thread_id == f"day-{claim_day.isoformat()}-a1"
+    assert store.day_claim(claim_day + timedelta(days=1)) is None
+    # The day's run lock: one holder at a time, released cleanly.
+    assert store.try_day_lock(claim_day) is True
+    assert store.try_day_lock(claim_day) is False
+    store.release_day_lock(claim_day)
+    assert store.try_day_lock(claim_day) is True
+    store.release_day_lock(claim_day)
+    # Reclaim is compare-and-swap on the interrupted attempt's
+    # number: the wrong number loses, the right one takes over.
+    second = DayClaim(day=claim_day, attempt=2, actor="battery-two",
+                      claimed_at=datetime(2031, 1, 1, tzinfo=timezone.utc),
+                      state="running", thread_id=f"day-{claim_day.isoformat()}-a2")
+    assert store.reclaim_day(second, from_attempt=99) is False
+    assert store.day_claim(claim_day).attempt == 1
+    assert store.reclaim_day(second, from_attempt=1) is True
+    assert store.day_claim(claim_day).actor == "battery-two"
+    # A completed claim is the day's standing record: it cannot be
+    # reclaimed, and the day cannot be claimed anew.
+    second.state = "completed"
+    store.save_day_claim(second)
+    assert store.day_claim(claim_day).state == "completed"
+    third = second.model_copy(update={"attempt": 3, "state": "running"})
+    assert store.reclaim_day(third, from_attempt=2) is False
+    assert store.claim_day(third) is False
+    assert store.day_claim(claim_day).attempt == 2
+
 
 def test_conformance_in_memory():
     battery(InMemoryStore())
@@ -254,6 +314,54 @@ def test_conformance_sqlite(tmp_path):
 )
 def test_conformance_postgres():
     battery(PostgresStore(os.environ["CASH_RECON_TEST_DATABASE_URL"]), tag=uuid.uuid4().hex[:8])
+
+
+@pytest.mark.skipif(
+    not os.environ.get("CASH_RECON_TEST_DATABASE_URL"),
+    reason="set CASH_RECON_TEST_DATABASE_URL to a throwaway Postgres to run the race test there",
+)
+def test_postgres_day_claim_two_writer_race():
+    """The round-10 gap, closed against the real store: two store
+    instances (two connections, two processes' worth of state)
+    race for the same day, released at the same moment — exactly
+    one wins the claim, exactly one holds the run lock, and the
+    lock passes to the loser only when the winner releases it."""
+    import threading
+
+    dsn = os.environ["CASH_RECON_TEST_DATABASE_URL"]
+    store_a, store_b = PostgresStore(dsn), PostgresStore(dsn)
+    day = date(2031, 1, 1) + timedelta(days=int(uuid.uuid4().hex[:8], 16) % 2000)
+
+    def race(fn):
+        barrier = threading.Barrier(2)
+        results: dict[str, bool] = {}
+
+        def go(name, store):
+            barrier.wait()
+            results[name] = fn(store)
+
+        threads = [
+            threading.Thread(target=go, args=("a", store_a)),
+            threading.Thread(target=go, args=("b", store_b)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return results
+
+    claims = race(lambda s: s.claim_day(DayClaim(
+        day=day, attempt=1, actor="racer",
+        claimed_at=datetime.now(timezone.utc), state="running")))
+    assert sorted(claims.values()) == [False, True]
+
+    locks = race(lambda s: s.try_day_lock(day))
+    assert sorted(locks.values()) == [False, True]
+    winner = store_a if locks["a"] else store_b
+    loser = store_b if locks["a"] else store_a
+    winner.release_day_lock(day)
+    assert loser.try_day_lock(day) is True
+    loser.release_day_lock(day)
 
 
 def test_sqlite_money_is_text_never_real(tmp_path):

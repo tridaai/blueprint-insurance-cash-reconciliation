@@ -45,7 +45,7 @@ from .config import Policy as PolicyConfig
 from .dataset import Dataset
 from .llm import OfflineReader
 from .matcher import MatchContext, match_line
-from .models import AuditEvent, ExceptionCode, ExceptionRecord, SuspenseItem
+from .models import AuditEvent, DayClaim, ExceptionCode, ExceptionRecord, SuspenseItem
 from .money import ZERO
 from .objects import ObjectStore
 from .report import day_report
@@ -458,6 +458,21 @@ def _run_events(store: Store, day: date) -> list[AuditEvent]:
     ]
 
 
+def _claim_reason(store: Store, day: date) -> str:
+    """Why a starter that lost the day's claim is refused, naming
+    the claim that stands against it: the attempt that holds the
+    day, when it was claimed, and by whom."""
+    holder = store.day_claim(day)
+    if holder is None:
+        return (f"day {day.isoformat()} is already claimed by another starter. "
+                "A day runs once, in one process at a time.")
+    return (f"day {day.isoformat()} is already claimed: attempt {holder.attempt} "
+            f"claimed it at {holder.claimed_at.isoformat()} by {holder.actor} "
+            f"and the claim stands (state: {holder.state}). A day runs once, "
+            "in one process at a time — a second starter is refused, and an "
+            "interrupted attempt is recovered only through the recovery path.")
+
+
 def _refuse_run(store: Store, day: date, actor: str, reason: str) -> None:
     """Record the refusal on the audit trail, then raise it. A
     refused run changes nothing else: the refusal event is the one
@@ -532,6 +547,26 @@ def run_day(store: Store, objects: ObjectStore, reader, policy: PolicyConfig,
       its own checkpoint thread. Approval remains the only applier
       throughout: an interrupted run has applied nothing, because
       applying is not the run's to do.
+
+    The trail guard above is read-then-write, and on its own it
+    could not make "a day runs once" true across processes: two
+    starters reading the same trail at the same moment would both
+    pass it. So before any of the run's own writes, the starter
+    takes the day's CLAIM at the store (the day_claims record,
+    migration 0006): the first starter's insert wins atomically,
+    and a second starter — even mid-run of the first — meets the
+    standing claim and is refused, naming the attempt that holds
+    it. The claim is paired with the day's run LOCK, held for the
+    run's duration: it is what lets the sanctioned recovery prove
+    the prior attempt is finished — the recovery path reads the
+    orphan verdict off the trail as before, then takes the lock
+    (a live attempt would still be holding it, and the recovery
+    refuses like any other second starter) and takes the claim
+    over by compare-and-swap on the interrupted attempt's number.
+    A completed run's claim stands as the day's record; a decided
+    pack's day is claimed permanently. A starter that claimed the
+    day and died before its start reached the trail is detected
+    from the claim itself and recovered the same way.
     """
     pack = store.pack(f"PACK-{day.isoformat()}")
     npack = store.pack(f"NPACK-{day.isoformat()}")
@@ -592,55 +627,106 @@ def run_day(store: Store, objects: ObjectStore, reader, policy: PolicyConfig,
         recovery = True
         orphan_note = "a pack stands for the day with no run record behind it"
 
+    if not recovery:
+        # A starter that claimed the day and died before its start
+        # reached the trail leaves no trail evidence — the claim is
+        # the only trace. A claim ahead of the trail's started
+        # count, still in the running state, is an interrupted
+        # attempt by the claim's own evidence, and is recovered
+        # like one (the recovery still has to win the day's lock
+        # below before it may take the claim over).
+        standing_claim = store.day_claim(day)
+        if (
+            standing_claim is not None
+            and standing_claim.state == "running"
+            and standing_claim.attempt > len(started)
+        ):
+            recovery = True
+            orphan_note = (
+                f"attempt {standing_claim.attempt} (claimed "
+                f"{standing_claim.claimed_at.isoformat()} by "
+                f"{standing_claim.actor}) never started")
+
     attempt = len(started) + 1
     thread_id = f"day-{day.isoformat()}-a{attempt}"
-    kept: dict = {}
+    claim = DayClaim(day=day, attempt=attempt, actor=actor, claimed_at=_now(),
+                     state="running", thread_id=thread_id)
+    # Win the day before writing anything of the run's own. The
+    # refusal paths above (decided pack, completed run) never get
+    # here; from here on, exactly one starter holds the day.
     if recovery:
-        store.audit(AuditEvent(
-            at=_now(), actor=actor, action="day_run_interrupted",
-            subject=day.isoformat(),
-            detail=f"the day's earlier attempt is marked interrupted: {orphan_note}. "
-                   f"Its partial work is superseded by attempt {attempt}; nothing it "
-                   "wrote was applied, because approval is the only applier."))
-        kept = _preserved_handling(store, day)
-        for standing in store.packs(on=day):
-            if standing.status.value == "proposed" and (
-                standing.pack_id == f"PACK-{day.isoformat()}"
-                or standing.pack_id.startswith(f"PACK-COMB-{day.isoformat()}")
-            ):
-                store.replace_allocations([], standing.pack_id)
-    store.audit(AuditEvent(
-        at=_now(), actor=actor, action="day_run_started", subject=day.isoformat(),
-        detail=f"attempt {attempt} on thread {thread_id}"
-               + ("; recovery of an interrupted attempt" if recovery else "")))
+        # The sanctioned recovery, and only it, may take a standing
+        # claim over — and only after proving the prior attempt
+        # finished: the trail verdict above, plus the day's lock,
+        # which a live attempt would still be holding.
+        if not store.try_day_lock(day):
+            _refuse_run(store, day, actor, _claim_reason(store, day))
+        existing = store.day_claim(day)
+        if existing is None:
+            won = store.claim_day(claim)
+        else:
+            won = store.reclaim_day(claim, from_attempt=existing.attempt)
+        if not won:
+            store.release_day_lock(day)
+            _refuse_run(store, day, actor, _claim_reason(store, day))
+    else:
+        if not store.claim_day(claim):
+            _refuse_run(store, day, actor, _claim_reason(store, day))
+        if not store.try_day_lock(day):
+            _refuse_run(store, day, actor, _claim_reason(store, day))
 
-    app = build_graph(store, objects, reader, policy)
-    result = app.invoke(
-        {"day": day.isoformat(), "actor": actor},
-        config={"configurable": {"thread_id": thread_id}},
-    )
-    if recovery:
-        _restore_handling(store, kept)
-        # The combination pass leaves a standing PACK-COMB untouched
-        # when it finds no new pairs — so a comb pack the dead
-        # attempt proposed keeps its entries, but the cleanse above
-        # took its index rows. Re-derive the index from the pack as
-        # it stands (the index's own contract: it describes the
-        # packs), restoring exactly what the proposal wrote.
-        for standing in store.packs(on=day):
-            if standing.status.value == "proposed" and standing.pack_id.startswith(
-                f"PACK-COMB-{day.isoformat()}"
-            ):
-                store.replace_allocations(
-                    [e.allocation for e in standing.entries if e.allocation],
-                    standing.pack_id,
-                )
-    store.audit(AuditEvent(
-        at=_now(), actor=actor, action="day_run_completed", subject=day.isoformat(),
-        detail=f"attempt {attempt} completed: posting pack "
-               f"{result.get('pack_id') or 'none'}, non-premium pack "
-               f"{result.get('non_premium_pack_id') or 'none'}, combination pack "
-               f"{result.get('combination_pack_id') or 'none'}"))
+    kept: dict = {}
+    try:
+        if recovery:
+            store.audit(AuditEvent(
+                at=_now(), actor=actor, action="day_run_interrupted",
+                subject=day.isoformat(),
+                detail=f"the day's earlier attempt is marked interrupted: {orphan_note}. "
+                       f"Its partial work is superseded by attempt {attempt}; nothing it "
+                       "wrote was applied, because approval is the only applier."))
+            kept = _preserved_handling(store, day)
+            for standing in store.packs(on=day):
+                if standing.status.value == "proposed" and (
+                    standing.pack_id == f"PACK-{day.isoformat()}"
+                    or standing.pack_id.startswith(f"PACK-COMB-{day.isoformat()}")
+                ):
+                    store.replace_allocations([], standing.pack_id)
+        store.audit(AuditEvent(
+            at=_now(), actor=actor, action="day_run_started", subject=day.isoformat(),
+            detail=f"attempt {attempt} on thread {thread_id}"
+                   + ("; recovery of an interrupted attempt" if recovery else "")))
+
+        app = build_graph(store, objects, reader, policy)
+        result = app.invoke(
+            {"day": day.isoformat(), "actor": actor},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        if recovery:
+            _restore_handling(store, kept)
+            # The combination pass leaves a standing PACK-COMB untouched
+            # when it finds no new pairs — so a comb pack the dead
+            # attempt proposed keeps its entries, but the cleanse above
+            # took its index rows. Re-derive the index from the pack as
+            # it stands (the index's own contract: it describes the
+            # packs), restoring exactly what the proposal wrote.
+            for standing in store.packs(on=day):
+                if standing.status.value == "proposed" and standing.pack_id.startswith(
+                    f"PACK-COMB-{day.isoformat()}"
+                ):
+                    store.replace_allocations(
+                        [e.allocation for e in standing.entries if e.allocation],
+                        standing.pack_id,
+                    )
+        store.audit(AuditEvent(
+            at=_now(), actor=actor, action="day_run_completed", subject=day.isoformat(),
+            detail=f"attempt {attempt} completed: posting pack "
+                   f"{result.get('pack_id') or 'none'}, non-premium pack "
+                   f"{result.get('non_premium_pack_id') or 'none'}, combination pack "
+                   f"{result.get('combination_pack_id') or 'none'}"))
+        claim.state = "completed"
+        store.save_day_claim(claim)
+    finally:
+        store.release_day_lock(day)
     return {
         "day": day.isoformat(),
         "pack_id": result.get("pack_id"),
