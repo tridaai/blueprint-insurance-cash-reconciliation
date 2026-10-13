@@ -394,10 +394,11 @@ class PostgresStore:
 
     def upsert_receivable(self, rec):
         self._put(
-            "INSERT INTO receivables (policy_number, broker_id, status, payload) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (policy_number) DO UPDATE SET "
-            "broker_id = EXCLUDED.broker_id, status = EXCLUDED.status, payload = EXCLUDED.payload",
-            (rec.policy_number, rec.broker_id, rec.status.value, dump(rec)),
+            "INSERT INTO receivables (policy_number, broker_id, status, currency, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (policy_number) DO UPDATE SET "
+            "broker_id = EXCLUDED.broker_id, status = EXCLUDED.status, "
+            "currency = EXCLUDED.currency, payload = EXCLUDED.payload",
+            (rec.policy_number, rec.broker_id, rec.status.value, rec.currency, dump(rec)),
         )
 
     def receivables(self):
@@ -410,17 +411,18 @@ class PostgresStore:
     # -- inputs --------------------------------------------------------------
     def add_bank_line(self, line):
         self._put(
-            "INSERT INTO bank_lines (bank_line_id, value_date, amount, payload) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (bank_line_id) DO NOTHING",
-            (line.bank_line_id, line.value_date, line.amount, dump(line)),
+            "INSERT INTO bank_lines (bank_line_id, value_date, amount, currency, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (bank_line_id) DO NOTHING",
+            (line.bank_line_id, line.value_date, line.amount, line.currency, dump(line)),
         )
 
     def save_bank_line(self, line):
         self._put(
-            "INSERT INTO bank_lines (bank_line_id, value_date, amount, payload) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (bank_line_id) DO UPDATE SET "
-            "value_date = EXCLUDED.value_date, amount = EXCLUDED.amount, payload = EXCLUDED.payload",
-            (line.bank_line_id, line.value_date, line.amount, dump(line)),
+            "INSERT INTO bank_lines (bank_line_id, value_date, amount, currency, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (bank_line_id) DO UPDATE SET "
+            "value_date = EXCLUDED.value_date, amount = EXCLUDED.amount, "
+            "currency = EXCLUDED.currency, payload = EXCLUDED.payload",
+            (line.bank_line_id, line.value_date, line.amount, line.currency, dump(line)),
         )
 
     def bank_lines(self, on=None):
@@ -434,9 +436,9 @@ class PostgresStore:
 
     def add_return(self, ret):
         self._put(
-            "INSERT INTO payment_returns (return_id, bank_line_id, return_date, amount, payload) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (return_id) DO NOTHING",
-            (ret.return_id, ret.bank_line_id, ret.return_date, ret.amount, dump(ret)),
+            "INSERT INTO payment_returns (return_id, bank_line_id, return_date, amount, currency, payload) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (return_id) DO NOTHING",
+            (ret.return_id, ret.bank_line_id, ret.return_date, ret.amount, ret.currency, dump(ret)),
         )
 
     def returns(self, on=None):
@@ -512,9 +514,9 @@ class PostgresStore:
     def save_allocations(self, allocs, pack_id):
         for a in allocs:
             self._put(
-                "INSERT INTO allocations (bank_line_id, policy_number, installment_id, amount, tier, pack_id, payload) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (bank_line_id, installment_id) DO NOTHING",
-                (a.bank_line_id, a.policy_number, a.installment_id, a.amount, a.tier.value if a.tier else None, pack_id, dump(a)),
+                "INSERT INTO allocations (bank_line_id, policy_number, installment_id, amount, tier, pack_id, currency, payload) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (bank_line_id, installment_id) DO NOTHING",
+                (a.bank_line_id, a.policy_number, a.installment_id, a.amount, a.tier.value if a.tier else None, pack_id, a.currency, dump(a)),
             )
 
     def replace_allocations(self, allocs, pack_id):
@@ -548,16 +550,16 @@ class PostgresStore:
 
     def add_suspense(self, item):
         self._put(
-            "INSERT INTO suspense_items (suspense_id, bank_line_id, received_date, payload) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (suspense_id) DO NOTHING",
-            (item.suspense_id, item.bank_line_id, item.received_date, dump(item)),
+            "INSERT INTO suspense_items (suspense_id, bank_line_id, received_date, currency, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (suspense_id) DO NOTHING",
+            (item.suspense_id, item.bank_line_id, item.received_date, item.currency, dump(item)),
         )
 
     def save_suspense(self, item):
         self._put(
-            "INSERT INTO suspense_items (suspense_id, bank_line_id, received_date, payload) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT (suspense_id) DO UPDATE SET payload = EXCLUDED.payload",
-            (item.suspense_id, item.bank_line_id, item.received_date, dump(item)),
+            "INSERT INTO suspense_items (suspense_id, bank_line_id, received_date, currency, payload) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (suspense_id) DO UPDATE SET payload = EXCLUDED.payload",
+            (item.suspense_id, item.bank_line_id, item.received_date, item.currency, dump(item)),
         )
 
     def suspense_items(self):
@@ -740,10 +742,11 @@ class SqliteStore:
 
     def upsert_receivable(self, rec):
         self._put(
-            "INSERT INTO receivables (policy_number, broker_id, status, payload) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT (policy_number) DO UPDATE SET "
-            "broker_id = excluded.broker_id, status = excluded.status, payload = excluded.payload",
-            (rec.policy_number, rec.broker_id, rec.status.value, dump(rec)),
+            "INSERT INTO receivables (policy_number, broker_id, status, currency, payload) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (policy_number) DO UPDATE SET "
+            "broker_id = excluded.broker_id, status = excluded.status, "
+            "currency = excluded.currency, payload = excluded.payload",
+            (rec.policy_number, rec.broker_id, rec.status.value, rec.currency, dump(rec)),
         )
 
     def receivables(self):
@@ -756,17 +759,18 @@ class SqliteStore:
     # -- inputs --------------------------------------------------------------
     def add_bank_line(self, line):
         self._put(
-            "INSERT OR IGNORE INTO bank_lines (bank_line_id, value_date, amount, payload) "
-            "VALUES (?, ?, ?, ?)",
-            (line.bank_line_id, line.value_date.isoformat(), str(line.amount), dump(line)),
+            "INSERT OR IGNORE INTO bank_lines (bank_line_id, value_date, amount, currency, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (line.bank_line_id, line.value_date.isoformat(), str(line.amount), line.currency, dump(line)),
         )
 
     def save_bank_line(self, line):
         self._put(
-            "INSERT INTO bank_lines (bank_line_id, value_date, amount, payload) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT (bank_line_id) DO UPDATE SET "
-            "value_date = excluded.value_date, amount = excluded.amount, payload = excluded.payload",
-            (line.bank_line_id, line.value_date.isoformat(), str(line.amount), dump(line)),
+            "INSERT INTO bank_lines (bank_line_id, value_date, amount, currency, payload) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (bank_line_id) DO UPDATE SET "
+            "value_date = excluded.value_date, amount = excluded.amount, "
+            "currency = excluded.currency, payload = excluded.payload",
+            (line.bank_line_id, line.value_date.isoformat(), str(line.amount), line.currency, dump(line)),
         )
 
     def bank_lines(self, on=None):
@@ -781,9 +785,9 @@ class SqliteStore:
 
     def add_return(self, ret):
         self._put(
-            "INSERT OR IGNORE INTO payment_returns (return_id, bank_line_id, return_date, amount, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ret.return_id, ret.bank_line_id, ret.return_date.isoformat(), str(ret.amount), dump(ret)),
+            "INSERT OR IGNORE INTO payment_returns (return_id, bank_line_id, return_date, amount, currency, payload) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (ret.return_id, ret.bank_line_id, ret.return_date.isoformat(), str(ret.amount), ret.currency, dump(ret)),
         )
 
     def returns(self, on=None):
@@ -856,10 +860,10 @@ class SqliteStore:
     def save_allocations(self, allocs, pack_id):
         for a in allocs:
             self._put(
-                "INSERT OR IGNORE INTO allocations (bank_line_id, policy_number, installment_id, amount, tier, pack_id, payload) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO allocations (bank_line_id, policy_number, installment_id, amount, tier, pack_id, currency, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (a.bank_line_id, a.policy_number, a.installment_id, str(a.amount),
-                 a.tier.value if a.tier else None, pack_id, dump(a)),
+                 a.tier.value if a.tier else None, pack_id, a.currency, dump(a)),
             )
 
     def replace_allocations(self, allocs, pack_id):
@@ -896,16 +900,16 @@ class SqliteStore:
 
     def add_suspense(self, item):
         self._put(
-            "INSERT OR IGNORE INTO suspense_items (suspense_id, bank_line_id, received_date, payload) "
-            "VALUES (?, ?, ?, ?)",
-            (item.suspense_id, item.bank_line_id, item.received_date.isoformat(), dump(item)),
+            "INSERT OR IGNORE INTO suspense_items (suspense_id, bank_line_id, received_date, currency, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (item.suspense_id, item.bank_line_id, item.received_date.isoformat(), item.currency, dump(item)),
         )
 
     def save_suspense(self, item):
         self._put(
-            "INSERT INTO suspense_items (suspense_id, bank_line_id, received_date, payload) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT (suspense_id) DO UPDATE SET payload = excluded.payload",
-            (item.suspense_id, item.bank_line_id, item.received_date.isoformat(), dump(item)),
+            "INSERT INTO suspense_items (suspense_id, bank_line_id, received_date, currency, payload) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (suspense_id) DO UPDATE SET payload = excluded.payload",
+            (item.suspense_id, item.bank_line_id, item.received_date.isoformat(), item.currency, dump(item)),
         )
 
     def suspense_items(self):

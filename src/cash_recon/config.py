@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 
@@ -82,6 +83,30 @@ NON_PREMIUM_RULES: tuple[dict, ...] = (
         "narrative_contains": "fee",
     },
 )
+
+
+# ---------------------------------------------------------------------------
+# Foreign exchange: the governed rate table.
+#
+# Northgate's functional currency is USD. Premium is also billed and
+# collected in EUR, and the cash desk converts at governed rates —
+# never at a rate the model suggests, never at a spot rate fetched
+# mid-match. A rate is quoted as functional units per one unit of
+# the foreign currency (EUR 1.08 = one euro is 1.08 dollars), with
+# an effective-from date, in the same mould as a broker's commission
+# rate history: a period prices by the date in force, and when a
+# rate changes mid-period the business on either side of the change
+# is priced at its own date's rate. Conversion happens in code
+# (fx.py), at defined points only: when an allocation is created
+# (at the rate in force on the bank line's value date) and when a
+# report translates a position for presentation (at the rate it
+# names). A recorded conversion is never re-priced.
+FX_RATE_HISTORY: dict[str, tuple[tuple[date, Decimal], ...]] = {
+    "EUR": (
+        (date(2026, 1, 1), Decimal("1.08")),
+        (date(2026, 11, 16), Decimal("1.10")),
+    ),
+}
 
 
 @dataclass(frozen=True)

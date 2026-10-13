@@ -51,6 +51,7 @@ class ExceptionCode(str, Enum):
     DUPLICATE_PAYMENT = "DUPLICATE_PAYMENT"  # same cash, twice
     STALE_SUSPENSE = "STALE_SUSPENSE"  # unapplied past the configured age
     INTENT_DIFFERS = "INTENT_DIFFERS"  # note indicated another installment; applied oldest-first
+    CURRENCY_NO_OPEN_ITEMS = "CURRENCY_NO_OPEN_ITEMS"  # the payer has nothing open in this line's currency
 
 
 class PackStatus(str, Enum):
@@ -111,6 +112,11 @@ class Installment(BaseModel):
     amount_due: Decimal
     amount_applied: Decimal = Decimal("0.00")
     status: InstallmentStatus = InstallmentStatus.OPEN
+    # The currency amount_due is denominated in — the policy's
+    # currency, carried on the installment so every open item names
+    # its own denomination. Matching is in-currency: cash settles
+    # only items denominated in the cash's own currency.
+    currency: str = "USD"
 
     @property
     def open_balance(self) -> Decimal:
@@ -124,6 +130,11 @@ class Receivable(BaseModel):
     insured_name: str
     broker_id: str | None  # None = direct-billed insured
     status: PolicyStatus = PolicyStatus.ACTIVE
+    # The currency the policy is billed in (ISO code). A specialty
+    # carrier bills in more than one currency; the receivable, its
+    # installments, and the cash that settles them all carry the
+    # denomination so no computation ever has to guess it.
+    currency: str = "USD"
     installments: list[Installment] = Field(default_factory=list)
     # The current term's span, when the billing record carries it.
     # The return-premium computation stands on these two dates; a
@@ -155,6 +166,12 @@ class BankLine(BaseModel):
     payer_name: str  # who the bank says sent it
     reference: str | None  # remittance reference / policy no., if stated
     narrative: str = ""  # free bank text, untrusted
+    # The currency the cash actually arrived in (ISO code). The
+    # amount is denominated in this and nothing else: the matcher
+    # works the line against open items in this currency only, and
+    # any functional-currency figure is a recorded conversion, made
+    # in code at the governed rate — never a match decision.
+    currency: str = "USD"
     resend_of: str | None = None  # a returned line this payment re-sends, if any
     # Provenance: how the line arrived — "dataset" (the synthetic
     # world), "import" (a bank statement file), or "manual" (added
@@ -198,6 +215,20 @@ class Allocation(BaseModel):
     amount: Decimal
     tier: Tier | None  # None for write-off entries (see PostingEntry)
     note: str = ""
+    # The denomination of `amount` — the bank line's currency, which
+    # is also the settled item's currency (matching is in-currency).
+    currency: str = "USD"
+    # For a non-functional-currency allocation, the conversion made
+    # in code when the allocation was created: the governed rate in
+    # force on the bank line's value date (functional units per one
+    # unit of the currency) and the resulting functional amount,
+    # rounded half-up to cents. Both are recorded, never recomputed
+    # later — a rate move, or a return reversing this allocation,
+    # uses these figures, so history is never re-priced. None on
+    # functional (USD) allocations, where amount IS the functional
+    # amount.
+    fx_rate: Decimal | None = None
+    functional_amount: Decimal | None = None
 
 
 class HandlingNote(BaseModel):
@@ -217,6 +248,7 @@ class ExceptionRecord(BaseModel):
     policy_number: str | None
     broker_id: str | None
     amount: Decimal  # the amount at issue (delta, or the full line)
+    currency: str = "USD"  # the currency `amount` is denominated in — the bank line's
     detail: str  # what happened, in words a cashier can act on
     first_seen: date
     status: str = "open"  # open | resolved | written_off
@@ -237,6 +269,10 @@ class SuspenseItem(BaseModel):
     amount: Decimal
     received_date: date
     reason: str
+    # The currency the parked cash is denominated in — the bank
+    # line's. Suspense is held per currency: an EUR balance is never
+    # added to a USD one anywhere in the reports.
+    currency: str = "USD"
     status: str = "open"  # open | resolved (closed by the re-match pass)
     resolved_on: date | None = None
 
@@ -287,6 +323,7 @@ class NonPremiumEntry(BaseModel):
     amount: Decimal
     payer_name: str
     narrative: str = ""
+    currency: str = "USD"  # the line's currency — a disposition disposes of the cash as it arrived
 
 
 class PostingEntry(BaseModel):
@@ -376,6 +413,7 @@ class PaymentReturn(BaseModel):
     return_date: date
     recorded_by: str
     amount: Decimal  # the full bank-line amount, always
+    currency: str = "USD"  # the original line's currency — the reversal is in that currency, at its recorded rates
     pack_ids: list[str] = Field(default_factory=list)  # approved packs that carried the line
     detail: str = ""
 
