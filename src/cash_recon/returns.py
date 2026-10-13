@@ -107,7 +107,7 @@ def _replay_deltas(store: Store) -> dict[tuple[str, str], Decimal]:
             if inst is None:
                 continue
             before = inst.amount_applied
-            rate = brokers[rec.broker_id].commission_rate if rec.broker_id else None
+            rate = brokers[rec.broker_id].rate_on(pack.value_date) if rec.broker_id else None
             gate._apply(rec, inst, alloc, rate)
             key = (alloc.bank_line_id, alloc.installment_id)
             deltas[key] = deltas.get(key, ZERO) + (inst.amount_applied - before)

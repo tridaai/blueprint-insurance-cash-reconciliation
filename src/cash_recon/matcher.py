@@ -117,11 +117,17 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", text.lower())).strip()
 
 
-def cash_due(rec: Receivable, installment, brokers: dict[str, Broker]) -> Decimal:
+def cash_due(rec: Receivable, installment, brokers: dict[str, Broker],
+             as_of: date | None = None) -> Decimal:
     """Cash that settles an installment: net of commission for broker
-    business, the billed amount for direct business."""
+    business, the billed amount for direct business. The commission
+    is the rate in force on `as_of` — the bank line's value date
+    when the matcher asks — because a broker whose rate changed
+    mid-book nets old-period cash at the old rate."""
     if rec.broker_id:
-        return net_of(installment.open_balance, brokers[rec.broker_id].commission_rate)
+        broker = brokers[rec.broker_id]
+        rate = broker.rate_on(as_of) if as_of is not None else broker.commission_rate
+        return net_of(installment.open_balance, rate)
     return installment.open_balance
 
 
@@ -380,7 +386,7 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
         return _finish(line, outcome)
 
     gross = [i.open_balance for i in insts]
-    cash = [cash_due(rec, i, ctx.brokers) for i in insts]
+    cash = [cash_due(rec, i, ctx.brokers, line.value_date) for i in insts]
     amount = line.amount
     next_gross, next_cash = gross[0], cash[0]
     full_gross, full_cash = sum(gross, ZERO), sum(cash, ZERO)
@@ -446,7 +452,7 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
     if amount < next_cash:
         if policy_broker is not None and len(insts) == 1:
             implied = (next_gross - amount) / next_gross
-            contracted = policy_broker.commission_rate
+            contracted = policy_broker.rate_on(line.value_date)
             clean_rate = (implied * 1000) == (implied * 1000).to_integral_value()
             if clean_rate and implied != contracted:
                 outcome.exceptions.append(
@@ -470,10 +476,22 @@ def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineO
         return _finish(line, outcome)
 
     # Between the next installment and a wider scope, not exact: apply in
-    # order on the cash basis; the tail is a visible part-payment.
-    allocs, _ = _distribute(line, rec, amount, cash, Tier.T3_REFERENCE,
-                            note="Applied across open installments, oldest open first.")
+    # order on the cash basis; the tail is a visible part-payment. A
+    # single-installment policy can still strand a leftover here —
+    # cash above its net due but below the gross billed (a broker
+    # netting at a stale rate, say) — and that leftover is an
+    # overpayment in suspense, like every other excess.
+    allocs, leftover = _distribute(line, rec, amount, cash, Tier.T3_REFERENCE,
+                                   note="Applied across open installments, oldest open first.")
     outcome.allocations, outcome.tier = allocs, Tier.T3_REFERENCE
+    if leftover > ZERO:
+        outcome.exceptions.append(
+            _exc(line, ExceptionCode.OVERPAID, leftover,
+                 f"Payment exceeds the amount due on {rec.policy_number} by {leftover} "
+                 "at the commission rate in force. Excess held in suspense.",
+                 policy_number=rec.policy_number, broker_id=rec.broker_id)
+        )
+        outcome.suspense_amount = leftover
     return _finish(line, outcome)
 
 
@@ -507,7 +525,7 @@ def _match_named(line, rec: Receivable, named, ctx, outcome) -> LineOutcome:
     balance it is OVERPAID, as everywhere else. The flow is written
     on the allocations and in the outcome notes."""
     gross_due = named.open_balance
-    cash_due_named = cash_due(rec, named, ctx.brokers)
+    cash_due_named = cash_due(rec, named, ctx.brokers, line.value_date)
     amount = line.amount
     note = f"Named installment {named.installment_id}, per the payer's reference."
 
@@ -555,7 +573,7 @@ def _match_named(line, rec: Receivable, named, ctx, outcome) -> LineOutcome:
     ordered = [i for i in others if i.sequence > named.sequence] + \
               [i for i in others if i.sequence < named.sequence]
     dues = [
-        i.open_balance if basis == "gross" else cash_due(rec, i, ctx.brokers)
+        i.open_balance if basis == "gross" else cash_due(rec, i, ctx.brokers, line.value_date)
         for i in ordered
     ]
     flow_note = (f"Remainder of the payment naming {named.installment_id}, applied to "
@@ -618,7 +636,7 @@ def _match_remittance(line, rem: Remittance, ctx, outcome) -> LineOutcome:
             outcome.suspense_amount += rline.amount
             continue
         insts = rec.open_installments()
-        dues = [cash_due(rec, i, ctx.brokers) for i in insts]
+        dues = [cash_due(rec, i, ctx.brokers, line.value_date) for i in insts]
         total_due = sum(dues, ZERO)
         if total_due == 0:
             outcome.exceptions.append(
@@ -661,7 +679,7 @@ def _propose_lump_sum(line, broker, ctx) -> LineOutcome | None:
         for inst in rec.open_installments():
             candidates.append(Candidate(policy_number=rec.policy_number,
                                         installment_id=inst.installment_id,
-                                        cash_due=cash_due(rec, inst, ctx.brokers)))
+                                        cash_due=cash_due(rec, inst, ctx.brokers, line.value_date)))
     if not candidates:
         return None
     proposal = ctx.proposer.propose_lump_sum(line.amount, line.payer_name, candidates)

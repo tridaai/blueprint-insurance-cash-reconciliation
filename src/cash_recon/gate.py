@@ -233,7 +233,10 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
             alloc = entry.allocation
             rec = touched.get(alloc.policy_number) or store.receivable(alloc.policy_number)
             inst = next(i for i in rec.installments if i.installment_id == alloc.installment_id)
-            rate = brokers[rec.broker_id].commission_rate if rec.broker_id else None
+            # The settlement rate is the one in force on the pack's
+            # value date — the day the cash was worked — not whatever
+            # the broker's rate has become by approval day.
+            rate = brokers[rec.broker_id].rate_on(pack.value_date) if rec.broker_id else None
             _apply(rec, inst, alloc, rate)
             touched[alloc.policy_number] = rec
         elif entry.kind == "write_off" and entry.write_off_exception_id:

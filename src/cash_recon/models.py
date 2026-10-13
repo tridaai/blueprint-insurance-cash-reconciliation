@@ -71,10 +71,36 @@ class ReturnReason(str, Enum):
 # ---------------------------------------------------------------- inputs
 
 
+class RatePeriod(BaseModel):
+    """One contracted commission rate, in force from a date.
+
+    A broker's rate changes mid-book: the contract is renegotiated
+    and remittances before the change net at the old rate, after it
+    at the new one. The history is what lets the matcher price a
+    remittance by the period it belongs to instead of by whatever
+    the rate happens to be today."""
+
+    effective_from: date
+    rate: Decimal
+
+
 class Broker(BaseModel):
     broker_id: str
     name: str
-    commission_rate: Decimal  # contracted, e.g. 0.125 for 12.5%
+    commission_rate: Decimal  # the rate currently in force, e.g. 0.125 for 12.5%
+    rate_history: list[RatePeriod] = Field(default_factory=list)
+
+    def rate_on(self, as_of: date) -> Decimal:
+        """The contracted rate in force on `as_of`: the latest
+        history period that has begun, the earliest period when the
+        date precedes them all, and the headline rate when no
+        history is recorded."""
+        if not self.rate_history:
+            return self.commission_rate
+        begun = [p for p in self.rate_history if p.effective_from <= as_of]
+        if begun:
+            return max(begun, key=lambda p: p.effective_from).rate
+        return min(self.rate_history, key=lambda p: p.effective_from).rate
 
 
 class Installment(BaseModel):

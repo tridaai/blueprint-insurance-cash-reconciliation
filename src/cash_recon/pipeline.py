@@ -316,7 +316,7 @@ def _expected_net(ctx: MatchContext, exc: ExceptionRecord):
     insts = rec.open_installments()
     if not insts:
         return ZERO
-    return cash_due(rec, insts[0], ctx.brokers)
+    return cash_due(rec, insts[0], ctx.brokers, exc.first_seen)
 
 
 def run_day(store: Store, objects: ObjectStore, reader, policy: PolicyConfig,
