@@ -114,6 +114,13 @@ def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) 
             "exactly as proposed, together, or the pack is rejected and the "
             "pair proposed again against the books as they then stand"
         )
+    if pack.resolution is not None:
+        raise GateError(
+            "a resolution pack's alternates are edited by nobody: the "
+            "approver chooses one candidate as scanned, or the pack is "
+            "rejected and the item scanned again against the books as "
+            "they then stand"
+        )
     if not adjustments:
         raise GateError("an edit names at least one adjustment")
 
@@ -200,6 +207,10 @@ def add_write_off(store, pack_id: str, exception_id: str, actor: str) -> Posting
         raise GateError(f"no such pack: {pack_id}")
     if pack.status.value != "proposed":
         raise GateError(f"pack {pack_id} is {pack.status.value}; write-offs attach to proposed packs")
+    if pack.resolution is not None:
+        raise GateError(
+            "write-offs do not attach to a resolution pack: it decides what "
+            "unidentified cash is, not what a shortfall costs")
     exc = next((e for e in store.exceptions() if e.exception_id == exception_id), None)
     if exc is None:
         raise GateError(f"no such exception: {exception_id}")
@@ -220,7 +231,24 @@ def add_write_off(store, pack_id: str, exception_id: str, actor: str) -> Posting
 
 
 def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
-                 second_approver: str | None = None) -> PostingPack:
+                 second_approver: str | None = None,
+                 choice: str | None = None) -> PostingPack:
+    """The human gate. Self-approval is refused; write-offs above
+    the threshold need a second, different approver. Only an
+    approval writes receivables — the apply loop below is the
+    single place in the system where cash application happens.
+
+    A resolution pack is decided differently: it carries
+    alternates, not entries, and approval must name the chosen
+    candidate (`choice`). The gate re-verifies the chosen
+    candidate against the books as they now stand, materialises
+    exactly that candidate's allocations as the pack's entries,
+    and applies them like any other pack's — so the posting file,
+    the day totals, and the returns replay all see the one
+    settlement that happened, never the sum of the roads not
+    taken. A choice on a pack that carries no alternates, or no
+    choice on a resolution pack, is refused: the choice is the
+    decision."""
     pack = store.pack(pack_id)
     if pack is None:
         raise GateError(f"no such pack: {pack_id}")
@@ -236,6 +264,62 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
             )
         if second_approver in (approver, pack.assembled_by):
             raise GateError("the second approver must differ from the approver and the assembler")
+
+    # Resolution packs: the choice is validated before anything is
+    # written, with the combination discipline — the candidate was
+    # proven against the books at scan time, and if its target
+    # installments have moved since, the pack is refused whole
+    # rather than applying a stale reading.
+    chosen = None
+    if pack.resolution is not None:
+        info = pack.resolution
+        decidable = [c.candidate_id for c in info.candidates if not c.flags]
+        if choice is None:
+            raise GateError(
+                f"pack {pack_id} is a resolution pack for suspense item "
+                f"{info.suspense_id}: it carries alternates "
+                f"({', '.join(decidable) or 'none decidable'}) and approval "
+                "must name the chosen candidate — the gate decides which "
+                "reading of this cash stands")
+        chosen = next((c for c in info.candidates if c.candidate_id == choice), None)
+        if chosen is None:
+            raise GateError(
+                f"pack {pack_id} carries no candidate {choice!r}; its "
+                f"candidates are {', '.join(c.candidate_id for c in info.candidates)}")
+        if chosen.flags:
+            raise GateError(
+                f"candidate {choice} names {chosen.policy_number}, which is "
+                f"flagged {', '.join(chosen.flags)}: it stands on the record "
+                "as considered, and the gate cannot choose it")
+        res_line = next((l for l in store.bank_lines()
+                         if l.bank_line_id == info.bank_line_id), None)
+        line_date = res_line.value_date if res_line is not None else None
+        brokers_now = {b.broker_id: b for b in store.brokers()}
+        for spec in chosen.allocations:
+            rec = store.receivable(spec.policy_number)
+            inst = next((i for i in rec.installments
+                         if i.installment_id == spec.installment_id), None) \
+                if rec is not None else None
+            # What the candidate's cash would settle, priced as the
+            # application will price it (the policy's broker rate
+            # in force on the day the cash arrived): if that no
+            # longer fits the installment's standing balance, the
+            # reading the approver is looking at is stale.
+            gross = spec.amount
+            if rec is not None and rec.broker_id and line_date is not None:
+                rate = brokers_now[rec.broker_id].rate_on(line_date)
+                gross = cents(spec.amount / (1 - rate))
+            if inst is None or gross > inst.open_balance:
+                raise GateError(
+                    f"candidate {choice} no longer fits the books: "
+                    f"{spec.installment_id} of {spec.policy_number} stands "
+                    f"open at {inst.open_balance if inst else 'nothing'} "
+                    f"against the {gross} the candidate's cash would settle; "
+                    "the books moved since the scan — the pack is refused "
+                    "whole; reject it and scan the item again")
+    elif choice is not None:
+        raise GateError(
+            f"pack {pack_id} carries no alternates; a choice names nothing here")
 
     # Combination settlements are re-verified before anything is
     # written, with the payout packs' discipline: the pair was
@@ -313,10 +397,43 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
     pack.approvals = [approver] + ([second_approver] if second_approver else [])
     pack.status = pack.status.APPROVED
     pack.decided_at = _now()
+    if chosen is not None:
+        # The choice becomes the pack's body: exactly the chosen
+        # candidate's allocations, at the figures the candidate was
+        # scanned with (its recorded conversion included). The
+        # unchosen candidates stay on the docket as lapsed.
+        info = pack.resolution
+        info.chosen_candidate = chosen.candidate_id
+        for spec in chosen.allocations:
+            alloc = Allocation(
+                bank_line_id=info.bank_line_id,
+                policy_number=spec.policy_number,
+                installment_id=spec.installment_id,
+                amount=spec.amount,
+                tier=None,
+                note=f"Resolution of {info.suspense_id}: candidate "
+                     f"{chosen.candidate_id} ({chosen.interpretation}). "
+                     f"{chosen.arithmetic}",
+                currency=info.currency,
+                fx_rate=spec.fx_rate,
+                functional_amount=spec.functional_amount,
+            )
+            pack.entries.append(PostingEntry(
+                kind="allocation", allocation=alloc,
+                proposal_kind="resolution", proposed_by=chosen.proposed_by))
+        store.save_allocations(
+            [e.allocation for e in pack.entries if e.allocation], pack_id)
     store.save_pack(pack)
 
     # The only place receivables change.
     brokers = {b.broker_id: b for b in store.brokers()}
+    # A resolution pack's allocations price like combination legs:
+    # the candidate was proven at the rate in force on the day its
+    # cash arrived — the bank line's value date — so the chosen
+    # settlement applies at that rate, the price it was proposed
+    # at, not the pack's (assembly) date rate.
+    res_line_date = line_dates.get(pack.resolution.bank_line_id) \
+        if pack.resolution is not None else None
     touched: dict[str, object] = {}
     for entry in pack.entries:
         if entry.kind == "allocation" and entry.allocation:
@@ -325,14 +442,15 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
             inst = next(i for i in rec.installments if i.installment_id == alloc.installment_id)
             # The settlement rate is the one in force on the pack's
             # value date — the day the cash was worked — not whatever
-            # the broker's rate has become by approval day. The one
-            # exception is a combination leg: the pair was proven
-            # with each leg priced at the rate in force on the day
-            # its own cash arrived (the legs can straddle a rate
-            # change), so the leg applies at that rate, the price it
-            # was proposed at.
+            # the broker's rate has become by approval day. The
+            # exceptions are a combination leg and a resolution
+            # allocation: both were proven with the cash priced at
+            # the rate in force on the day it arrived, so they
+            # apply at that rate, the price they were proposed at.
             if entry.combination_id:
                 rate = comb_rates.get((entry.combination_id, alloc.bank_line_id))
+            elif pack.resolution is not None and rec.broker_id:
+                rate = brokers[rec.broker_id].rate_on(res_line_date or pack.value_date)
             else:
                 rate = brokers[rec.broker_id].rate_on(pack.value_date) if rec.broker_id else None
             _apply(rec, inst, alloc, rate)
@@ -372,6 +490,36 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
             if exc.bank_line_id in leg_line_ids:
                 exc.status = "resolved"
                 store.update_exception(exc)
+
+    # A resolution approval disposes of the suspense item itself:
+    # the cash the gate just applied WAS the item's cash, so the
+    # item closes and its UNIDENTIFIED exception closes with it —
+    # and the decision lands on the item's own trail, naming the
+    # chosen candidate and the approver, beside the scan that
+    # produced it.
+    if pack.resolution is not None and chosen is not None:
+        info = pack.resolution
+        item = next((i for i in store.suspense_items()
+                     if i.suspense_id == info.suspense_id), None)
+        if item is not None and item.status == "open":
+            item.status = "resolved"
+            item.resolved_on = pack.decided_at.date()
+            store.save_suspense(item)
+        for exc in store.exceptions(status="open"):
+            if (exc.bank_line_id == info.bank_line_id
+                    and exc.code.value == "UNIDENTIFIED"):
+                exc.status = "resolved"
+                store.update_exception(exc)
+        lapsed = [c.candidate_id for c in info.candidates
+                  if not c.flags and c.candidate_id != chosen.candidate_id]
+        store.audit(AuditEvent(
+            at=_now(), actor=approver, action="suspense_resolution_decided",
+            subject=info.suspense_id,
+            detail=f"resolution pack {pack_id} approved by {approver}: "
+                   f"candidate {chosen.candidate_id} "
+                   f"({chosen.policy_number}, {chosen.interpretation}) chosen"
+                   + (f"; candidates {', '.join(lapsed)} lapsed to the "
+                      "pack's record" if lapsed else "")))
 
     store.audit(AuditEvent(at=_now(), actor=approver, action="pack_approved", subject=pack_id,
                            detail=f"allocations {pack.allocation_total}, write-offs {pack.write_off_total}, "
@@ -436,6 +584,19 @@ def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
                 item.resolved_on = None
                 store.save_suspense(item)
     store.audit(AuditEvent(at=_now(), actor=actor, action="pack_rejected", subject=pack_id, detail=reason))
+    if pack.resolution is not None:
+        # The item was never touched — it stands open, as it did
+        # while the pack stood proposed — and the candidates lapse
+        # to the rejected pack's record. The decision lands on the
+        # item's own trail so the next scan starts from the full
+        # history of what was already considered.
+        info = pack.resolution
+        store.audit(AuditEvent(
+            at=_now(), actor=actor, action="suspense_resolution_decided",
+            subject=info.suspense_id,
+            detail=f"resolution pack {pack_id} rejected by {actor}: {reason} "
+                   f"Its {len(info.candidates)} candidate(s) lapse to the "
+                   "pack's record; the cash stays in suspense."))
     webhooks.emit(store, "pack_rejected", pack_id, actor, {
         "allocations": as_str(pack.allocation_total),
         "write_offs": as_str(pack.write_off_total),

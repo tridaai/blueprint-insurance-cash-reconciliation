@@ -537,7 +537,14 @@ def proposal_quality(store: Store, month: tuple[int, int] | None = None) -> dict
     model's work, and an edit's author is on the entry for anyone
     who needs the audit trail, not ranked here. With `month`, only
     packs whose value date falls in it count — the form the
-    month-end close pack carries."""
+    month-end close pack carries.
+
+    Resolution proposals are graded at the candidate, not the
+    entry: a resolution pack puts a SET of alternates to the gate,
+    and the meaningful outcomes are which one was CHOSEN, which
+    LAPSED back to the record unchosen, and — when the docket was
+    rejected — that every candidate on it was REJECTED. Flagged
+    candidates were never decidable and are not graded."""
     by_kind: dict[str, dict] = {}
     details: list[dict] = []
 
@@ -545,6 +552,7 @@ def proposal_quality(store: Store, month: tuple[int, int] | None = None) -> dict
         return by_kind.setdefault(kind, {
             "proposals": 0, "accepted_as_proposed": 0,
             "accepted_with_edits": 0, "rejected": 0, "value_edited": ZERO,
+            "chosen": 0, "lapsed": 0,
         })
 
     packs = sorted(store.packs(), key=lambda p: (p.value_date, p.pack_id))
@@ -552,6 +560,33 @@ def proposal_quality(store: Store, month: tuple[int, int] | None = None) -> dict
         if pack.status.value not in ("approved", "rejected"):
             continue
         if month is not None and (pack.value_date.year, pack.value_date.month) != month:
+            continue
+        if pack.resolution is not None:
+            info = pack.resolution
+            s = slot("resolution")
+            for cand in info.candidates:
+                if cand.flags:
+                    continue  # considered and flagged — never put to the gate
+                if pack.status.value == "rejected":
+                    outcome = "REJECTED"
+                elif cand.candidate_id == info.chosen_candidate:
+                    outcome = "CHOSEN"
+                else:
+                    outcome = "LAPSED"
+                s["proposals"] += 1
+                s[outcome.lower()] += 1
+                details.append({
+                    "pack_id": pack.pack_id,
+                    "bank_line_id": info.bank_line_id,
+                    "policy_number": cand.policy_number,
+                    "installment_id": cand.allocations[0].installment_id if cand.allocations else "",
+                    "kind": "resolution",
+                    "proposed_by": cand.proposed_by,
+                    "outcome": outcome,
+                    "amount": str(cand.total),
+                    "original_amount": str(cand.total),
+                    "edited_value": "0.00",
+                })
             continue
         for entry in pack.entries:
             if entry.kind != "allocation" or not entry.allocation or not entry.proposal_kind:
@@ -591,14 +626,21 @@ def proposal_quality(store: Store, month: tuple[int, int] | None = None) -> dict
                 "edited_value": str(edited_value),
             })
 
-    def render(s: dict) -> dict:
-        return {
+    def render(kind: str, s: dict) -> dict:
+        out = {
             "proposals": s["proposals"],
             "accepted_as_proposed": s["accepted_as_proposed"],
             "accepted_with_edits": s["accepted_with_edits"],
             "rejected": s["rejected"],
             "value_edited": str(s["value_edited"]),
         }
+        if kind == "resolution":
+            # The resolution outcomes are a choice among alternates:
+            # one chosen, the rest lapsed (or all rejected with the
+            # docket). They ride beside the shared shape, not in it.
+            out["chosen"] = s["chosen"]
+            out["lapsed"] = s["lapsed"]
+        return out
 
     totals = {
         "proposals": sum(s["proposals"] for s in by_kind.values()),
@@ -607,8 +649,11 @@ def proposal_quality(store: Store, month: tuple[int, int] | None = None) -> dict
         "rejected": sum(s["rejected"] for s in by_kind.values()),
         "value_edited": str(sum((s["value_edited"] for s in by_kind.values()), ZERO)),
     }
+    if "resolution" in by_kind:
+        totals["chosen"] = sum(s["chosen"] for s in by_kind.values())
+        totals["lapsed"] = sum(s["lapsed"] for s in by_kind.values())
     return {
-        "by_kind": {k: render(v) for k, v in sorted(by_kind.items())},
+        "by_kind": {k: render(k, v) for k, v in sorted(by_kind.items())},
         "totals": totals,
         "proposals": details,
     }

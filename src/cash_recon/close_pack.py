@@ -186,6 +186,18 @@ def _positions(store: Store) -> tuple[list[_Position], dict[str, Decimal]]:
                     releases[entry.allocation.bank_line_id].append(
                         (pack.value_date, entry.allocation.amount)
                     )
+            elif pack.pack_id.startswith("PACK-RESOLVE"):
+                # A resolution pack releases only when the gate
+                # approved it: the item stands open while the
+                # docket stands proposed, so a proposed or
+                # rejected docket releases nothing. The approved
+                # pack's entries are exactly the chosen candidate's
+                # allocations, so the release is the one settlement
+                # that happened.
+                if pack.status.value == "approved":
+                    releases[entry.allocation.bank_line_id].append(
+                        (pack.value_date, entry.allocation.amount)
+                    )
             else:
                 day_alloc[entry.allocation.bank_line_id] += entry.allocation.amount
     positions = []
