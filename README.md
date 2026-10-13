@@ -67,7 +67,7 @@ its limits — free-form remittance advices need a connected model.
 make install     # uv sync --extra dev
 make demo        # Northgate's September, end to end, offline
 make test        # pytest
-make evals       # the golden-case gate (68 cases, gold by construction)
+make evals       # the golden-case gate (72 cases, gold by construction)
 make evals-live  # the live reading set — needs a provider key (SKIPPED-LIVE without one)
 make serve       # API + console on http://localhost:8000
 make prod-smoke  # prove the production profile against real PostgreSQL + S3 (env required)
@@ -391,6 +391,54 @@ Recoveries are proposals, not postings: they land in a
 still does not settle stays in suspense with its reason updated to
 the now-correct code, and every attempt — tiers run, outcome — is
 on the item's audit trail.
+
+**Resolving the unidentified.** Some wires nobody can attribute:
+no usable reference, a payer that matches no broker's book and no
+insured. They sit in suspense as `UNIDENTIFIED`, and the tiers
+cannot help — there is no known payer to work from. The resolution
+scan (the console's Suspense tab, `POST /api/suspense/{id}/scan`,
+`cash-recon resolve-scan`) is the governed second look. Because
+the payer is genuinely unknown, the one restriction that governs
+known-payer money — a lump sum settles only within its own
+broker's book — has nothing to protect here, so the scan reads the
+**whole book**. What replaces the restriction is stricter in a
+different way: a candidate exists only when it carries **exact
+arithmetic** — the amount equals an open installment's billed
+balance, or its cash due net of commission at some broker's
+contracted rate in force (the candidate names that broker and
+rate), or a run of consecutive installments' dues — or **verbatim
+evidence**: the line's own narrative or reference names the policy
+(a reference the bank mangled past the matcher's strict pattern
+still counts, quoted), the insured, or a broker. A candidate with
+neither is not a candidate. A policy the evidence names but whose
+cash cannot be applied — cancelled, or nothing open — is returned
+**flagged**: on the record as considered, never choosable. A
+connected model may rank the candidates and explain the ranking,
+and may point at a policy the scan missed only by quoting the
+line's text verbatim — the same citation discipline as remittance
+reading, and an uncited addition is refused. The scan's candidates
+are never removed by the model; with no provider configured the
+deterministic scan stands alone and the output is labelled
+heuristic.
+
+Candidates become a settlement only at the gate. Assembling a
+resolution pack (`cash-recon resolve-assemble`) produces a
+`PACK-RESOLVE-<date>-<item>` docket carrying the candidate set as
+**alternates** — no entries, and the suspense item stays open,
+because a hypothesis is not a claim on the cash. Approval must
+name the **one chosen candidate**: the gate re-verifies it
+against the books as they now stand, applies exactly that
+candidate through the ordinary arithmetic (a netting candidate
+grosses up at its broker's rate in force on the day the cash
+arrived), resolves the item and its exception, and leaves the
+unchosen candidates on the pack's record — lapsed, not deleted.
+Rejection leaves the item open and the candidates on the rejected
+pack. Nothing auto-applies, ever, however strong a candidate
+looks. A policy already standing under the same reading in
+another undecided resolution pack cannot be proposed twice — the
+assembly refuses, naming the conflict. The proposal-quality
+report grades the new kind by candidate: **chosen**, **lapsed**,
+**rejected**.
 
 **The workbench.** The queue has an owner and a memory (console
 Workbench tab, `GET /api/workbench`, `cash-recon workbench`).
@@ -775,7 +823,7 @@ references.
 ## Evals
 
 `make evals` runs the synthetic months through the real pipeline and
-scores 68 golden cases committed at `evals/golden.jsonl`: every tier,
+scores 72 golden cases committed at `evals/golden.jsonl`: every tier,
 every planted exception, the remittance readings, the injection, the
 near-duplicate, two re-match cases (a corrected advice rescues its
 wire; an advice that still does not foot leaves the cash open under
@@ -824,7 +872,13 @@ their recorded conversions at each date's rate, the return after
 the FX move reversing at the recorded rate and the re-send
 converting at the new one, both cross-currency wires settling
 nothing under CURRENCY_NO_OPEN_ITEMS, the per-currency day
-sections and close rolls, and the month-end translations). The runner prints a
+sections and close rolls, and the month-end translations), and the
+resolution cases in small worlds of their own (unidentified cash
+resolved by its own mangled narrative, an amount two brokers'
+rates both explain where only the narrative disambiguates — the
+wrong-broker candidate present and bare — a wire with no
+defensible candidate whose assembly refuses in words, and a
+rejected docket whose candidates stay on its record). The runner prints a
 `GATE: PASS` / `GATE: FAIL` verdict and exits non-zero on failure.
 Read the set for what it is: cases the builders wrote, passing by
 construction — a regression gate, not an accuracy claim about your
@@ -888,6 +942,7 @@ src/cash_recon/
   pipeline.py    the day run as a LangGraph graph, behind the run-once lifecycle guard
   checkpoints.py checkpoint retention: the governed prune of the LangGraph checkpoint store
   rematch.py     the suspense re-match pass: late information, same tiers, same gate
+  resolution.py  the resolution scan: whole-book candidates for unidentified cash, dockets at the gate
   store.py       Postgres (production) / SQLite (local) / in-memory (tests)
   objects.py     S3-compatible document storage
   api.py         FastAPI: health, run, gate, reports, console
@@ -899,8 +954,8 @@ tests/           pytest: tiers, netting math, gate rules, footing, guardrails
 
 ## Honest status
 
-The blueprint is built and passing its automated gates: 220 tests,
-68/68 eval cases, every demo day footing to the cent. Live
+The blueprint is built and passing its automated gates: 238 tests,
+72/72 eval cases, every demo day footing to the cent. Live
 verification against a connected model is still pending — the reader
 and proposer adapters are implemented and validation-tested with
 stubbed transports, the offline fallback is what the demo and the

@@ -626,6 +626,90 @@ suspected duplicates never legs) is a stated limit, not an
 oversight: wider combination search is exponential, ambiguous, and
 belongs to a human working the workbench.
 
+## Resolution proposals for unidentified cash
+
+The combination pass is the second look at cash whose payer is
+*known* but whose shape defeated the tiers. Unidentified cash is
+the harder case: no usable reference, a payer attributable to no
+book — the line lands in suspense as `UNIDENTIFIED` and no tier
+can engage, because every tier's discipline starts from knowing
+whose money it is. The resolution scan (`resolution.py`) is the
+governed second look at that pile, and its first design question
+is scope.
+
+**Why the whole book, and what replaces the book restriction.**
+The lump-sum rule — settle only within the paying broker's own
+book, refuse cross-broker proposals whole — protects money whose
+owner is *known*. Unidentified cash has no known owner: that is
+the problem being worked, so the restriction has nothing to
+protect, and withholding the rest of the book would withhold the
+answer. What replaces it is an evidence discipline, enforced in
+code: a candidate exists only when it carries **exact arithmetic**
+(an interpretation of the amount that foots to the cent, with the
+figures and the contracted rate shown on its face) or **verbatim
+evidence** from the line's own text (a policy number — including
+one the bank mangled past the matcher's strict pattern — an
+insured name, or a broker name, quoted as it stands). Most strong
+candidates carry both, and evidence found in the text attaches to
+arithmetic candidates on the evidenced policy or book, which is
+what disambiguates the planted hard case: one amount that foots
+at two brokers' rates, where only the narrative names the sending
+desk. A policy the evidence names whose cash cannot be applied
+(cancelled, nothing open, another currency) yields a *flagged*
+candidate — carried on the record as considered, carrying no
+allocations, and refused by the gate if chosen. Candidates are
+built on the cash basis throughout (what settling each
+installment takes through the gate's `_apply`), so a chosen
+candidate applies whole without leaving residue suspense on the
+line it resolves.
+
+**The model ranks; it does not invent.** A connected reader may
+order the scan's candidates and explain the order, and may point
+at a policy the deterministic scan missed only under the
+remittance reader's citation discipline: the evidence must be a
+verbatim quote of the line's text, validated in code, and the
+candidate itself is then *constructed* by the same narrative rule
+the scan uses — the model points, code builds. Scan candidates
+are never removed by the model. Offline, there is no ranking: the
+scan stands alone and its output is labelled heuristic.
+
+**Alternates live in metadata; entries exist only after the
+choice.** A resolution pack (`PACK-RESOLVE-<date>-<item>`) stores
+its candidate set on the pack record (`PostingPack.resolution`)
+and holds **no entries** while proposed. This is forced by the
+alternates semantics: every consumer that sums entries — the day
+report's posted total, the posting file a human uploads, the
+returns replay — must see the one settlement that happened, never
+the sum of the roads not taken. Approval therefore takes a new
+parameter, the chosen candidate: the gate re-verifies the chosen
+candidate against the books as they now stand (the gross its cash
+would settle, priced at the policy's broker rate in force on the
+*line's* value date — the price it was proposed at, the
+combination-leg precedent), materialises exactly that candidate's
+allocations as the pack's entries, and applies them through the
+ordinary path. The unchosen candidates lapse onto the pack's
+record; the quality report grades the kind by candidate —
+**chosen / lapsed / rejected**.
+
+Two deliberate contrasts with combinations. First, the suspense
+item stays **open** while a resolution pack stands proposed: a
+combination's legs were *proven* to settle their target, so
+holding them resolved mirrors the proof; a resolution candidate
+is a hypothesis among alternates, and the cash is still
+unexplained — it keeps aging, and the day footing keeps counting
+it as suspense, until the gate chooses. The close pack's position
+reconstruction follows: a resolution pack releases suspense only
+when approved (at its value date, like every pack-born release).
+Second, a rejected resolution pack needs no freeing logic —
+nothing was ever held — and the item is immediately scannable
+again. Assembly guards the docket's integrity: one standing
+docket per item, and no policy proposed twice under the same
+interpretation across undecided dockets (the assembly refuses,
+naming the conflict pack). Resolution packs accept no entry edits
+and no write-offs: the approver chooses a candidate as scanned,
+or the pack is rejected and the item re-scanned against the books
+as they then stand.
+
 ## Non-premium lines
 
 Classification is placed *before* the tiers, in the match node, and
