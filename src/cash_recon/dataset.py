@@ -200,7 +200,8 @@ def build_dataset() -> Dataset:
     def bank(bid, day, amount, payer, reference=None, narrative=""):
         bank_lines.append(
             BankLine(bank_line_id=bid, value_date=day, amount=cents(amount),
-                     payer_name=payer, reference=reference, narrative=narrative)
+                     payer_name=payer, reference=reference, narrative=narrative,
+                     source="dataset")
         )
 
     # ---- opening suspense: two older unidentified lines -----------------
@@ -443,36 +444,36 @@ def build_october_dataset() -> OctoberDataset:
     bank_lines = [
         # Oct 2 — a new direct policy pays its premium in full.
         BankLine(bank_line_id="BL-107", value_date=date(2026, 10, 2), amount=D("3150.00"),
-                 payer_name="Wexford Tutoring LLC", reference="NSP-1048", narrative=""),
+                 payer_name="Wexford Tutoring LLC", reference="NSP-1048", narrative="", source="dataset"),
         # Oct 5 — the renewal wire names installment 5 of NSP-1003 and
         # settles exactly that one, at Bayline's 10%: 2,600 × 0.9.
         BankLine(bank_line_id="BL-105", value_date=date(2026, 10, 5), amount=D("2340.00"),
-                 payer_name="Bayline Risk Partners", reference="NSP-1003-I5", narrative=""),
+                 payer_name="Bayline Risk Partners", reference="NSP-1003-I5", narrative="", source="dataset"),
         # Oct 6 — Fernway settles a September policy before the rate
         # change: 4,410.00 nets at the 11% in force, 3,924.90.
         BankLine(bank_line_id="BL-101", value_date=date(2026, 10, 6), amount=D("3924.90"),
-                 payer_name=fern, reference="NSP-1007", narrative=""),
+                 payer_name=fern, reference="NSP-1007", narrative="", source="dataset"),
         # Oct 13 — Alder's wire is exactly NSP-1038's first-installment
         # net (3,356.76 at 12.5%) plus NSP-1030's net (5,076.00 at
         # Bayline's 10%) — two brokers' books in one wire from one
         # broker. It must not be allocated across brokers.
         BankLine(bank_line_id="BL-106", value_date=date(2026, 10, 13), amount=D("8432.76"),
                  payer_name="Alder & Voss Insurance Brokers", reference=None,
-                 narrative="monthly settlement — multiple accounts"),
+                 narrative="monthly settlement — multiple accounts", source="dataset"),
         # Oct 20 — a new Fernway policy nets at the NEW 13%: 8,000 × 0.87.
         BankLine(bank_line_id="BL-102", value_date=date(2026, 10, 20), amount=D("6960.00"),
-                 payer_name=fern, reference="NSP-1046", narrative=""),
+                 payer_name=fern, reference="NSP-1046", narrative="", source="dataset"),
         # Oct 21 — Fernway nets NSP-1047 at the OLD 11% after the
         # change: 6,400 × 0.89 = 5,696.00 against a net due of
         # 5,568.00 at the 13% in force. The bill settles; 128.00 is
         # overpaid into suspense — the old rate no longer applies.
         BankLine(bank_line_id="BL-103", value_date=date(2026, 10, 21), amount=D("5696.00"),
-                 payer_name=fern, reference="NSP-1047", narrative=""),
+                 payer_name=fern, reference="NSP-1047", narrative="", source="dataset"),
         # Oct 22 — Fernway nets NSP-1049 at 15%, a rate no period of
         # the contract ever held: a clean implied rate that is not
         # the contracted one. Netting mismatch; the cash is held.
         BankLine(bank_line_id="BL-104", value_date=date(2026, 10, 22), amount=D("4250.00"),
-                 payer_name=fern, reference="NSP-1049", narrative=""),
+                 payer_name=fern, reference="NSP-1049", narrative="", source="dataset"),
     ]
     gold = {
         "BL-107": GoldOutcome(tier="T1_EXACT", allocations={"NSP-1048": "3150.00"}),

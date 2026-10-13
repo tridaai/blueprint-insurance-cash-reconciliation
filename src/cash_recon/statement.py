@@ -111,9 +111,17 @@ def _line_id(value_date: date, bank_ref: str, amount: Decimal) -> str:
     return "IMP-" + hashlib.sha256(key.encode()).hexdigest()[:12].upper()
 
 
+def import_batch_id(text: str) -> str:
+    """The batch id of one statement import: a digest of the file's
+    own text, so the same statement re-imported carries the same
+    batch id, and every line it brought in traces to that batch."""
+    return "STMT-" + hashlib.sha256(text.encode()).hexdigest()[:10].upper()
+
+
 def import_statement(store: Store, text: str, source_name: str = "statement") -> dict:
     """Import one statement's text. Returns the import report;
     raises StatementImportError (nothing stored) on any refusal."""
+    batch_id = import_batch_id(text)
     rows = list(csv.reader(io.StringIO(text)))
     header_at = None
     columns: dict[str, int] = {}
@@ -193,6 +201,8 @@ def import_statement(store: Store, text: str, source_name: str = "statement") ->
             payer_name=_payer_of(description, cell(row, "payer")),
             reference=bank_ref if POLICY_RE.search(bank_ref) else None,
             narrative=description,
+            source="import",
+            import_batch=batch_id,
         ))
 
     if control_total is not None and credits_total != control_total:
@@ -219,6 +229,7 @@ def import_statement(store: Store, text: str, source_name: str = "statement") ->
 
     report = {
         "source": source_name,
+        "batch_id": batch_id,
         "data_rows": data_rows,
         "credit_rows": len(parsed),
         "debit_rows_skipped": debit_rows,
@@ -232,7 +243,7 @@ def import_statement(store: Store, text: str, source_name: str = "statement") ->
     store.audit(AuditEvent(
         at=datetime.now(timezone.utc), actor="statement_import",
         action="statement_imported", subject=source_name,
-        detail=f"{len(imported_ids)} line(s) imported, {skipped} already seen, "
+        detail=f"batch {batch_id}: {len(imported_ids)} line(s) imported, {skipped} already seen, "
                f"{debit_rows} debit row(s) skipped, credits {credits_total}",
     ))
     return report

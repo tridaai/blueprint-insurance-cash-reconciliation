@@ -156,6 +156,13 @@ class BankLine(BaseModel):
     reference: str | None  # remittance reference / policy no., if stated
     narrative: str = ""  # free bank text, untrusted
     resend_of: str | None = None  # a returned line this payment re-sends, if any
+    # Provenance: how the line arrived — "dataset" (the synthetic
+    # world), "import" (a bank statement file), or "manual" (added
+    # directly, the default for anything nobody stamped). An import
+    # also carries its batch id, so the line traces to the exact
+    # statement import that brought it in.
+    source: str = "manual"
+    import_batch: str | None = None
 
 
 class RemittanceLine(BaseModel):
