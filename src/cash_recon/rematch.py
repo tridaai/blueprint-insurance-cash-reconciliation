@@ -101,6 +101,7 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         prior_lines=sorted(store.bank_lines(), key=lambda l: (l.value_date, l.bank_line_id)),
         settled_line_ids=set(approved) | set(allocated),
         returned_line_ids={r.bank_line_id for r in store.returns()},
+        payables={p.policy_number: p for p in store.payables(status="open")},
         proposer=reader,
         policy=policy,
     )
@@ -140,8 +141,14 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
         open_exceptions = [
             e for e in store.exceptions(status="open") if e.bank_line_id == line.bank_line_id
         ]
-        tier_name = outcome.tier.value if outcome.tier else f"proposal by {outcome.proposed_by}"
-        if outcome.allocations and outcome.suspense_amount == ZERO:
+        if outcome.tier:
+            tier_name = outcome.tier.value
+        elif outcome.offsets:
+            tier_name = "netted against a return-premium payable"
+        else:
+            tier_name = f"proposal by {outcome.proposed_by}"
+        settled_amount = outcome.allocated_total + outcome.offset_total
+        if settled_amount > ZERO and outcome.suspense_amount == ZERO:
             for e in open_exceptions:
                 e.status = "resolved"
                 store.update_exception(e)
@@ -160,7 +167,7 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
                       f"suspense into the re-match pack"
             ))
             log.info("rematch %s: rescued at %s", line.bank_line_id, tier_name)
-        elif outcome.allocations:
+        elif settled_amount > ZERO:
             for e in open_exceptions:
                 e.status = "resolved"
                 store.update_exception(e)
@@ -172,13 +179,13 @@ def rematch_suspense(store: Store, reader, policy: PolicyConfig,
             outcomes.append(outcome)
             partial.append({
                 "suspense_id": item.suspense_id, "bank_line_id": line.bank_line_id,
-                "settled": str(outcome.allocated_total),
+                "settled": str(settled_amount),
                 "remaining": str(outcome.suspense_amount),
                 "tier": tier_name,
             })
             attempts.append((
                 item, f"tiers run {TIERS_RUN}; partially settled at {tier_name} — "
-                      f"{outcome.allocated_total} allocated, {outcome.suspense_amount} "
+                      f"{settled_amount} settled, {outcome.suspense_amount} "
                       f"still open as {item.reason}"
             ))
             log.info("rematch %s: partial at %s", line.bank_line_id, tier_name)

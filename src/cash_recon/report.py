@@ -101,6 +101,69 @@ def returns_view(store: Store, on: date | None = None) -> dict:
     }
 
 
+def _return_premium_day_lines(store: Store, day: date, netted_total: Decimal) -> dict:
+    """The day's return-premium control lines: payables a
+    cancellation opened today, the cash netted against payables in
+    today's packs (computed by the caller from the pack entries),
+    and the payout packs approved with today's value date. These
+    describe the payable ledger; they are not terms of the bank
+    identity beyond the netting, which the footing already names."""
+    opened = [p for p in store.payables() if p.opened_on == day]
+    payouts = [
+        p for p in store.payout_packs(on=day) if p.status.value == "approved"
+    ]
+    return {
+        "payables_opened": {
+            "count": len(opened),
+            "total": str(sum((p.amount for p in opened), ZERO)),
+            "payable_ids": [p.payable_id for p in opened],
+        },
+        "netted_total": str(netted_total),
+        "payouts_approved": {
+            "count": len(payouts),
+            "total": str(sum((p.total for p in payouts), ZERO)),
+            "pack_ids": [p.pack_id for p in payouts],
+        },
+    }
+
+
+def return_premiums_view(store: Store) -> dict:
+    """Every return-premium payable on the books, with its chain:
+    the cancellation that opened it, what incoming cash netted
+    against it, what payout packs settled, and what still stands.
+    The read model behind the console's payables table and
+    /api/payables."""
+    payables = store.payables()
+    return {
+        "open_count": len([p for p in payables if p.status == "open"]),
+        "open_total": str(sum((p.remaining for p in payables if p.status == "open"), ZERO)),
+        "netted_total": str(sum((p.amount_netted for p in payables), ZERO)),
+        "paid_total": str(sum((p.amount_paid for p in payables), ZERO)),
+        "payables": [
+            {
+                "payable_id": p.payable_id,
+                "policy_number": p.policy_number,
+                "cancellation_id": p.cancellation_id,
+                "payee_kind": p.payee_kind,
+                "payee_name": p.payee_name,
+                "broker_id": p.broker_id,
+                "amount": str(p.amount),
+                "amount_netted": str(p.amount_netted),
+                "amount_paid": str(p.amount_paid),
+                "remaining": str(p.remaining),
+                "status": p.status,
+                "opened_on": p.opened_on.isoformat(),
+                "events": [
+                    {"on": e.on.isoformat(), "kind": e.kind, "amount": str(e.amount),
+                     "ref": e.ref, "note": e.note}
+                    for e in p.events
+                ],
+            }
+            for p in payables
+        ],
+    }
+
+
 def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
     lines = store.bank_lines(on=day)
     packs = store.packs(on=day)
@@ -113,6 +176,17 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
 
     bank_total = sum((l.amount for l in lines), ZERO)
     allocated_total = sum((a.amount for a in allocations), ZERO)
+    # Cash netted against return-premium payables rides the day's
+    # packs as offset entries: it is neither allocated to an
+    # installment nor sitting in suspense, and the footing identity
+    # names it as its own term rather than losing it.
+    netted_by_line: dict[str, Decimal] = {}
+    for pack in packs:
+        for entry in pack.entries:
+            if entry.payable_offset and entry.payable_offset.bank_line_id in line_ids:
+                lid = entry.payable_offset.bank_line_id
+                netted_by_line[lid] = netted_by_line.get(lid, ZERO) + entry.payable_offset.amount
+    netted_total = sum(netted_by_line.values(), ZERO)
     suspense_total = sum((i.amount for i in suspense_today), ZERO)
     posted_total = sum(
         (
@@ -137,12 +211,15 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
         susp_by_line[i.bank_line_id] = susp_by_line.get(i.bank_line_id, ZERO) + i.amount
     for line in lines:
         key = _broker_key(store, line, brokers)
-        bucket = by_broker.setdefault(key, {"bank": ZERO, "allocated": ZERO, "suspense": ZERO})
+        bucket = by_broker.setdefault(
+            key, {"bank": ZERO, "allocated": ZERO, "netted": ZERO, "suspense": ZERO}
+        )
         bucket["bank"] += line.amount
         bucket["allocated"] += alloc_by_line.get(line.bank_line_id, ZERO)
+        bucket["netted"] += netted_by_line.get(line.bank_line_id, ZERO)
         bucket["suspense"] += susp_by_line.get(line.bank_line_id, ZERO)
 
-    footing_ok = bank_total == allocated_total + suspense_total
+    footing_ok = bank_total == allocated_total + netted_total + suspense_total
     stale = [
         i for i in store.suspense_items()
         if i.status == "open" and i.age_days(day) > policy.stale_suspense_days
@@ -167,11 +244,18 @@ def day_report(store: Store, day: date, policy: PolicyConfig) -> dict:
         "footing_ok": footing_ok,
         "reconciled": footing_ok,
         "footing_note": (
-            "Bank total equals applied plus suspense, to the cent."
+            (
+                "Bank total equals applied plus cash netted against return-premium "
+                "payables plus suspense, to the cent."
+                if netted_total > ZERO
+                else "Bank total equals applied plus suspense, to the cent."
+            )
             if footing_ok
             else f"FOOTING FAILURE: bank {bank_total} != applied {allocated_total} "
-            f"+ suspense {suspense_total}. The day is NOT reconciled."
+            f"+ netted {netted_total} + suspense {suspense_total}. The day is NOT reconciled."
         ),
+        "netted_total": str(netted_total),
+        "return_premiums": _return_premium_day_lines(store, day, netted_total),
         "exceptions": [
             {
                 "exception_id": e.exception_id,

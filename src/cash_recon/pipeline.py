@@ -167,6 +167,7 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
             prior_lines=prior,
             settled_line_ids=set(settled),
             returned_line_ids={r.bank_line_id for r in store.returns()},
+            payables={p.policy_number: p for p in store.payables(status="open")},
             proposer=reader,
             policy=policy,
         )
@@ -211,6 +212,7 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
                     amount=outcome.suspense_amount, received_date=line.value_date, reason=reason))
             store.audit(AuditEvent(at=_now(), actor="matcher", action="line_matched", subject=line.bank_line_id,
                                    detail=f"tier={outcome.tier}, allocated={outcome.allocated_total}, "
+                                          f"netted={outcome.offset_total}, "
                                           f"suspense={outcome.suspense_amount}, "
                                           f"exceptions={[e.code.value for e in outcome.exceptions]}"))
             if outcome.resend_of:

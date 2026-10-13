@@ -33,6 +33,7 @@ from .models import (
     AuditEvent,
     EntryEdit,
     InstallmentStatus,
+    PayableEvent,
     PolicyStatus,
     PostingEntry,
     PostingPack,
@@ -74,6 +75,8 @@ def assemble_pack(day, outcomes: list[LineOutcome], assembled_by: str, policy: P
                 proposal_kind=kind,
                 proposed_by=outcome.proposed_by if kind else None,
             ))
+        for offset in outcome.offsets:
+            pack.entries.append(PostingEntry(kind="payable_offset", payable_offset=offset))
     return pack
 
 
@@ -220,6 +223,29 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
         if second_approver in (approver, pack.assembled_by):
             raise GateError("the second approver must differ from the approver and the assembler")
 
+    # Payable offsets are validated before anything is written: a
+    # payable that moved since the pack was assembled refuses the
+    # approval whole, with the pack still proposed and nothing
+    # applied — the same discipline as a payout pack.
+    offset_totals: dict[str, Decimal] = {}
+    for entry in pack.entries:
+        if entry.kind == "payable_offset" and entry.payable_offset:
+            o = entry.payable_offset
+            offset_totals[o.payable_id] = offset_totals.get(o.payable_id, ZERO) + o.amount
+    for payable_id, total in offset_totals.items():
+        payable = store.payable(payable_id)
+        if payable is None:
+            raise GateError(
+                f"pack {pack_id} nets {total} against payable {payable_id}, "
+                "which is no longer on the books"
+            )
+        if total > payable.remaining:
+            raise GateError(
+                f"pack {pack_id} nets {total} against payable {payable_id}, which has "
+                f"only {payable.remaining} standing; the payable moved since the pack "
+                "was assembled"
+            )
+
     pack.approvals = [approver] + ([second_approver] if second_approver else [])
     pack.status = pack.status.APPROVED
     pack.decided_at = _now()
@@ -243,6 +269,19 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
             exc = next(e for e in store.exceptions() if e.exception_id == entry.write_off_exception_id)
             exc.status = "written_off"
             store.update_exception(exc)
+        elif entry.kind == "payable_offset" and entry.payable_offset:
+            offset = entry.payable_offset
+            payable = store.payable(offset.payable_id)
+            payable.amount_netted = cents(payable.amount_netted + offset.amount)
+            payable.events = [*payable.events, PayableEvent(
+                on=pack.value_date, kind="netted", amount=offset.amount,
+                ref=offset.bank_line_id,
+                note=f"Netted under {pack_id}: cash from {offset.bank_line_id} for "
+                     f"cancelled policy {offset.policy_number}.",
+            )]
+            if payable.remaining == ZERO:
+                payable.status = "settled"
+            store.save_payable(payable)
     for rec in touched.values():
         if rec.status == PolicyStatus.ACTIVE and rec.open_balance == ZERO:
             rec.status = PolicyStatus.PAID_IN_FULL
@@ -250,6 +289,7 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
 
     store.audit(AuditEvent(at=_now(), actor=approver, action="pack_approved", subject=pack_id,
                            detail=f"allocations {pack.allocation_total}, write-offs {pack.write_off_total}, "
+                                  f"payable offsets {pack.offset_total}, "
                                   f"approvals: {', '.join(pack.approvals)}"))
     return pack
 
@@ -309,6 +349,11 @@ def posting_file(pack: PostingPack) -> str:
                              a.policy_number, a.installment_id, a.bank_line_id,
                              f"{a.amount:.2f}", a.tier.value if a.tier else "PROPOSED",
                              ";".join(pack.approvals)])
+        elif entry.kind == "payable_offset" and entry.payable_offset:
+            o = entry.payable_offset
+            writer.writerow([pack.pack_id, pack.value_date.isoformat(), "return_premium_offset",
+                             o.policy_number, o.payable_id, o.bank_line_id,
+                             f"{o.amount:.2f}", "", ";".join(pack.approvals)])
         else:
             writer.writerow([pack.pack_id, pack.value_date.isoformat(), "write_off",
                              entry.write_off_policy or "", "", "",

@@ -32,8 +32,13 @@ outcome carries an INTENT_DIFFERS flag so the desk sees the payer's
 apparent intent differed. Money is never left in suspense over a
 guess about intent.
 
-Every line ends fully accounted for: allocations + suspense == the
-bank amount, to the cent. The matcher asserts it.
+Cash for a cancelled policy is the one place the tiers step aside
+before they start: it meets any open return-premium payable on that
+policy first, in code, and only the remainder is exceptioned into
+suspense as before.
+
+Every line ends fully accounted for: allocations + payable offsets
++ suspense == the bank amount, to the cent. The matcher asserts it.
 """
 
 from __future__ import annotations
@@ -53,9 +58,11 @@ from .models import (
     Broker,
     ExceptionCode,
     ExceptionRecord,
+    PayableOffset,
     PolicyStatus,
     Receivable,
     Remittance,
+    ReturnPremiumPayable,
     Tier,
 )
 from .money import ZERO, cents, net_of
@@ -69,6 +76,7 @@ INTENT_RE = re.compile(r"(?:instal{1,2}ment|inst)\.?\s*(?:no\.?|#)?\s*(\d+)", re
 class LineOutcome(BaseModel):
     bank_line_id: str
     allocations: list[Allocation] = []
+    offsets: list[PayableOffset] = []
     exceptions: list[ExceptionRecord] = []
     suspense_amount: Decimal = ZERO
     tier: Tier | None = None
@@ -79,6 +87,10 @@ class LineOutcome(BaseModel):
     @property
     def allocated_total(self) -> Decimal:
         return sum((a.amount for a in self.allocations), ZERO)
+
+    @property
+    def offset_total(self) -> Decimal:
+        return sum((o.amount for o in self.offsets), ZERO)
 
 
 @dataclass
@@ -94,7 +106,11 @@ class MatchContext:
     # line's fingerprint is reusable: the payer re-sending the money
     # is not a duplicate, it is the same payment arriving again.
     returned_line_ids: set[str] = field(default_factory=set)
+    # Open return-premium payables by policy number: cash for a
+    # cancelled policy meets the return premium owed on it first.
+    payables: dict[str, ReturnPremiumPayable] = field(default_factory=dict)
     _consumed_remittances: set[str] = field(default_factory=set)
+    _payable_offset_used: dict[str, Decimal] = field(default_factory=dict)
 
     def broker_for_payer(self, payer: str) -> Broker | None:
         norm = _norm(payer)
@@ -362,16 +378,50 @@ def _find_resend(line: BankLine, ctx: MatchContext) -> BankLine | None:
     return None
 
 
+def _net_against_payable(line, rec: Receivable, amount: Decimal, ctx, outcome) -> Decimal:
+    """Meet an open return-premium payable with incoming cash for
+    its cancelled policy, in code, before anything else is decided
+    about the money. Returns what is left after the netting.
+
+    The offset is a proposal like any other: it rides the day's
+    pack and reduces the payable only when the pack is approved.
+    Within one run the payable can be met only once per cent it has
+    standing — the context tracks what outcomes have already taken,
+    so two wires for the same cancelled policy cannot net more
+    than the carrier owes."""
+    payable = ctx.payables.get(rec.policy_number)
+    if payable is None:
+        return amount
+    used = ctx._payable_offset_used.get(payable.payable_id, ZERO)
+    available = payable.remaining - used
+    if available <= ZERO:
+        return amount
+    offset = min(amount, available)
+    ctx._payable_offset_used[payable.payable_id] = used + offset
+    outcome.offsets.append(PayableOffset(
+        bank_line_id=line.bank_line_id, payable_id=payable.payable_id,
+        policy_number=rec.policy_number, amount=offset))
+    outcome.notes.append(
+        f"Netted {offset} against return-premium payable {payable.payable_id} "
+        f"(owed to the {payable.payee_kind}, {payable.payee_name}); the payable "
+        f"falls to {payable.remaining - used - offset} when the pack carrying "
+        "this line is approved."
+    )
+    return amount - offset
+
+
 def _match_reference(line, rec: Receivable, ctx, outcome, payer_broker) -> LineOutcome:
     policy_broker = ctx.brokers.get(rec.broker_id) if rec.broker_id else None
     if rec.status == PolicyStatus.CANCELLED:
-        outcome.exceptions.append(
-            _exc(line, ExceptionCode.CANCELLED_POLICY, line.amount,
-                 f"Policy {rec.policy_number} was cancelled before this cash "
-                 "arrived. Held in suspense; refund or reallocation is a human call.",
-                 policy_number=rec.policy_number, broker_id=rec.broker_id)
-        )
-        outcome.suspense_amount = line.amount
+        remainder = _net_against_payable(line, rec, line.amount, ctx, outcome)
+        if remainder > ZERO:
+            outcome.exceptions.append(
+                _exc(line, ExceptionCode.CANCELLED_POLICY, remainder,
+                     f"Policy {rec.policy_number} was cancelled before this cash "
+                     "arrived. Held in suspense; refund or reallocation is a human call.",
+                     policy_number=rec.policy_number, broker_id=rec.broker_id)
+            )
+            outcome.suspense_amount = remainder
         return _finish(line, outcome)
 
     insts = rec.open_installments()
@@ -627,13 +677,15 @@ def _match_remittance(line, rem: Remittance, ctx, outcome) -> LineOutcome:
             outcome.suspense_amount += rline.amount
             continue
         if rec.status == PolicyStatus.CANCELLED:
-            outcome.exceptions.append(
-                _exc(line, ExceptionCode.CANCELLED_POLICY, rline.amount,
-                     f"Remittance {rem.remittance_id} pays {rline.policy_number}, which was "
-                     "cancelled. That portion is held in suspense.",
-                     policy_number=rline.policy_number, broker_id=rem.broker_id)
-            )
-            outcome.suspense_amount += rline.amount
+            remainder = _net_against_payable(line, rec, rline.amount, ctx, outcome)
+            if remainder > ZERO:
+                outcome.exceptions.append(
+                    _exc(line, ExceptionCode.CANCELLED_POLICY, remainder,
+                         f"Remittance {rem.remittance_id} pays {rline.policy_number}, which was "
+                         "cancelled. That portion is held in suspense.",
+                         policy_number=rline.policy_number, broker_id=rem.broker_id)
+                )
+                outcome.suspense_amount += remainder
             continue
         insts = rec.open_installments()
         dues = [cash_due(rec, i, ctx.brokers, line.value_date) for i in insts]
@@ -685,6 +737,15 @@ def _propose_lump_sum(line, broker, ctx) -> LineOutcome | None:
     proposal = ctx.proposer.propose_lump_sum(line.amount, line.payer_name, candidates)
     if proposal is None:
         return None
+    # One broker's wire settles that broker's book. A proposal
+    # naming another broker's open item is refused whole, whoever
+    # produced it: cross-broker allocation is not a settlement, it
+    # is two desks' money mixed, and the wire goes to suspense for
+    # a human to explain instead.
+    for cand in proposal.allocations:
+        named = ctx.receivables.get(cand.policy_number)
+        if named is None or named.broker_id != broker.broker_id:
+            return None
     outcome = LineOutcome(bank_line_id=line.bank_line_id, proposed_by=proposal.backend)
     for cand in proposal.allocations:
         outcome.allocations.append(
@@ -697,9 +758,10 @@ def _propose_lump_sum(line, broker, ctx) -> LineOutcome | None:
 
 
 def _finish(line: BankLine, outcome: LineOutcome) -> LineOutcome:
-    accounted = outcome.allocated_total + outcome.suspense_amount
+    accounted = outcome.allocated_total + outcome.offset_total + outcome.suspense_amount
     assert accounted == line.amount, (
-        f"{line.bank_line_id}: allocations {outcome.allocated_total} + suspense "
-        f"{outcome.suspense_amount} != bank amount {line.amount}"
+        f"{line.bank_line_id}: allocations {outcome.allocated_total} + payable offsets "
+        f"{outcome.offset_total} + suspense {outcome.suspense_amount} "
+        f"!= bank amount {line.amount}"
     )
     return outcome

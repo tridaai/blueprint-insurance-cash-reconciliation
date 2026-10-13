@@ -61,7 +61,8 @@ def test_migrations_are_numbered_and_present():
     from pathlib import Path
 
     files = sorted(p.name for p in Path("migrations").glob("*.sql"))
-    assert files == ["0001_core.sql", "0002_document_embeddings.sql", "0003_payment_returns.sql"]
+    assert files == ["0001_core.sql", "0002_document_embeddings.sql", "0003_payment_returns.sql",
+                     "0004_return_premiums.sql"]
     assert "CREATE EXTENSION" in Path("migrations/0001_core.sql").read_text()
     # The SQLite dialect mirrors the same numbered set, in its own
     # directory: same semantics, no pgvector, no server extensions.
