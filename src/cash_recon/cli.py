@@ -12,14 +12,17 @@ import argparse
 import json
 from datetime import date
 
+from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
+from .gate import GateError
 from .llm import make_reader
 from .objects import make_object_store
+from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
-from .report import broker_scorecard, day_report, proposal_quality
+from .report import broker_scorecard, day_report, proposal_quality, return_premiums_view
 from .returns import ReturnError, line_history, record_return
 from .workbench import WorkbenchError, add_handling_note, assign_exception, workbench_view
 from .statement import StatementImportError, import_statement
@@ -69,6 +72,27 @@ def main() -> None:
     nte.add_argument("text")
     nte.add_argument("--actor", required=True)
     sub.add_parser("quality", help="the model proposal quality report: what the gate did with the model's work")
+    cxl = sub.add_parser("cancel", help="record a mid-term cancellation; opens the return-premium payable")
+    cxl.add_argument("policy_number")
+    cxl.add_argument("--effective", required=True, help="cancellation effective date YYYY-MM-DD")
+    cxl.add_argument("--actor", required=True, help="who records the cancellation (a named person)")
+    cxl.add_argument("--on", default=None, help="recording date YYYY-MM-DD (default today)")
+    cxl.add_argument("--reason", default="")
+    sub.add_parser("payables", help="the return-premium payables, with their chains")
+    asm = sub.add_parser("payout-assemble", help="assemble a payout pack from open payables")
+    asm.add_argument("--on", required=True, help="payout value date YYYY-MM-DD")
+    asm.add_argument("--payables", required=True, help="comma-separated payable ids")
+    asm.add_argument("--actor", required=True, help="who assembles the pack")
+    app_ = sub.add_parser("payout-approve", help="approve a payout pack at the gate")
+    app_.add_argument("pack_id")
+    app_.add_argument("--approver", required=True)
+    app_.add_argument("--second", default=None, help="second approver (required above the single-approver limit)")
+    rej = sub.add_parser("payout-reject", help="reject a payout pack, with a reason on the record")
+    rej.add_argument("pack_id")
+    rej.add_argument("--actor", required=True)
+    rej.add_argument("--reason", required=True)
+    pfile = sub.add_parser("payout-file", help="print an approved payout pack's payout file (CSV)")
+    pfile.add_argument("pack_id")
     args = parser.parse_args()
 
     store, objects = make_store(), make_object_store()
@@ -130,6 +154,43 @@ def main() -> None:
             assignee=args.assignee, unassigned=args.unassigned), indent=2))
     elif args.command == "quality":
         print(json.dumps(proposal_quality(store), indent=2))
+    elif args.command == "cancel":
+        from .store import dump
+
+        try:
+            recorded = record_cancellation(
+                store, args.policy_number, date.fromisoformat(args.effective),
+                args.actor, date.fromisoformat(args.on) if args.on else date.today(),
+                reason=args.reason,
+            )
+        except CancellationError as exc:
+            parser.exit(1, f"cancellation refused: {exc}\n")
+        print(json.dumps(json.loads(dump(recorded)), indent=2))
+    elif args.command == "payables":
+        print(json.dumps(return_premiums_view(store), indent=2))
+    elif args.command in ("payout-assemble", "payout-approve", "payout-reject", "payout-file"):
+        from .store import dump
+
+        try:
+            if args.command == "payout-assemble":
+                pack = assemble_payout_pack(
+                    store, date.fromisoformat(args.on),
+                    [p.strip() for p in args.payables.split(",") if p.strip()], args.actor)
+                print(json.dumps(json.loads(dump(pack)), indent=2))
+            elif args.command == "payout-approve":
+                pack = approve_payout_pack(store, args.pack_id, args.approver, policy,
+                                           second_approver=args.second)
+                print(json.dumps(json.loads(dump(pack)), indent=2))
+            elif args.command == "payout-reject":
+                pack = reject_payout_pack(store, args.pack_id, args.actor, args.reason)
+                print(json.dumps(json.loads(dump(pack)), indent=2))
+            else:
+                pack = store.payout_pack(args.pack_id)
+                if pack is None:
+                    parser.exit(1, f"no such payout pack: {args.pack_id}\n")
+                print(payout_file(pack), end="")
+        except GateError as exc:
+            parser.exit(1, f"payout refused: {exc}\n")
     elif args.command in ("assign", "note"):
         from .store import dump
 

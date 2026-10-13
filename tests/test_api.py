@@ -1,5 +1,7 @@
 """The API shell: health, seed → run → report → gate, over HTTP."""
 
+from decimal import Decimal
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -97,3 +99,57 @@ def test_exceptions_and_suspense_endpoints(client):
     buckets = client.get("/api/suspense?as_of=2026-09-08").json()
     totals = {b["bucket"]: b["total"] for b in buckets}
     assert totals["60+ days"] == "940.00"
+
+
+def test_return_premiums_over_http():
+    from datetime import date as _date
+
+    from cash_recon.models import Installment, PolicyStatus, Receivable
+
+    store = InMemoryStore()
+    inst = Installment(installment_id="NSP-7001-I1", policy_number="NSP-7001",
+                       sequence=1, due_date=_date(2026, 9, 1), amount_due=Decimal("12000.00"),
+                       amount_applied=Decimal("6000.00"), status="partially_applied")
+    store.upsert_receivable(Receivable(
+        policy_number="NSP-7001", insured_name="Insured NSP-7001", broker_id=None,
+        status=PolicyStatus.ACTIVE, installments=[inst],
+        term_start=_date(2026, 9, 1), term_end=_date(2027, 9, 1)))
+    client = TestClient(create_app(Service(
+        store, InMemoryObjectStore(), OfflineReader(), PolicyConfig())))
+
+    cxl = client.post("/api/policies/NSP-7001/cancel", json={
+        "effective_date": "2026-12-01", "recorded_by": "Priya Nair",
+        "recorded_on": "2026-12-01", "reason": "insured's request"})
+    assert cxl.status_code == 200, cxl.text
+    body = cxl.json()
+    assert body["payee_kind"] == "insured"
+    assert body["return_premium"] == "3008.22"
+    again = client.post("/api/policies/NSP-7001/cancel", json={
+        "effective_date": "2026-12-02", "recorded_by": "Priya Nair"})
+    assert again.status_code == 409 and "already cancelled" in again.json()["detail"]
+
+    view = client.get("/api/payables").json()
+    assert view["open_count"] == 1 and view["open_total"] == "3008.22"
+    payable = view["payables"][0]
+    assert payable["policy_number"] == "NSP-7001" and payable["status"] == "open"
+
+    pack = client.post("/api/payout-packs", json={
+        "value_date": "2026-12-04", "payable_ids": [payable["payable_id"]],
+        "assembled_by": "cash-team"})
+    assert pack.status_code == 200, pack.text
+    pack_id = pack.json()["pack_id"]
+    self_app = client.post(f"/api/payout-packs/{pack_id}/approve", json={"approver": "cash-team"})
+    assert self_app.status_code == 409 and "self-approval" in self_app.json()["detail"]
+    needs_second = client.post(f"/api/payout-packs/{pack_id}/approve",
+                               json={"approver": "Priya Nair"})
+    assert needs_second.status_code == 409 and "second approver" in needs_second.json()["detail"]
+    ok = client.post(f"/api/payout-packs/{pack_id}/approve",
+                     json={"approver": "Priya Nair", "second_approver": "Sofia Marino"})
+    assert ok.status_code == 200, ok.text
+    text = client.get(f"/api/payout-packs/{pack_id}/payout-file")
+    assert text.status_code == 200 and payable["payable_id"] in text.text
+    after = client.get("/api/payables").json()
+    assert after["payables"][0]["status"] == "paid"
+    assert after["payables"][0]["remaining"] == "0.00"
+    listed = client.get("/api/cancellations").json()
+    assert [c["policy_number"] for c in listed] == ["NSP-7001"]

@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from . import gate, report as report_mod
+from .cancellations import CancellationError, record_cancellation
 from .close_pack import close_pack_export, parse_month, render_close_pack_text
 from .config import Policy as PolicyConfig
 from .dataset import build_dataset
@@ -25,6 +26,7 @@ from .gate import GateError
 from .llm import make_reader
 from .logging_setup import configure_logging, new_request_id
 from .objects import ObjectStore, make_object_store
+from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
 from .pipeline import ingest_dataset, run_day
 from .rematch import rematch_suspense
 from .returns import ReturnError, line_history, record_return
@@ -92,6 +94,19 @@ class ReturnRequest(BaseModel):
     actor: str
     on: date | None = None
     amount: str | None = None  # anything but the full line amount is refused, in words
+
+
+class CancelRequest(BaseModel):
+    effective_date: date
+    recorded_by: str
+    recorded_on: date | None = None
+    reason: str = ""
+
+
+class PayoutAssembleRequest(BaseModel):
+    value_date: date
+    payable_ids: list[str]
+    assembled_by: str
 
 
 def present(model) -> dict:
@@ -364,6 +379,70 @@ def create_app(service: Service | None = None) -> FastAPI:
             raise HTTPException(404, f"no such pack: {pack_id}")
         try:
             return PlainTextResponse(gate.posting_file(found), media_type="text/csv")
+        except GateError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/cancellations")
+    def cancellations():
+        s = get_service()
+        return [present(c) for c in s.store.cancellations()]
+
+    @app.post("/api/policies/{policy_number}/cancel")
+    def cancel_policy(policy_number: str, body: CancelRequest):
+        s = get_service()
+        try:
+            cxl = record_cancellation(
+                s.store, policy_number, body.effective_date, body.recorded_by,
+                body.recorded_on or date.today(), reason=body.reason,
+            )
+        except CancellationError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return present(cxl)
+
+    @app.get("/api/payables")
+    def payables():
+        s = get_service()
+        return report_mod.return_premiums_view(s.store)
+
+    @app.get("/api/payout-packs")
+    def payout_packs():
+        s = get_service()
+        return [present(p) for p in s.store.payout_packs()]
+
+    @app.post("/api/payout-packs")
+    def assemble_payout(body: PayoutAssembleRequest):
+        s = get_service()
+        try:
+            return present(assemble_payout_pack(
+                s.store, body.value_date, body.payable_ids, body.assembled_by))
+        except GateError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/payout-packs/{pack_id}/approve")
+    def approve_payout(pack_id: str, body: ApproveRequest):
+        s = get_service()
+        try:
+            return present(approve_payout_pack(
+                s.store, pack_id, body.approver, s.policy, body.second_approver))
+        except GateError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/payout-packs/{pack_id}/reject")
+    def reject_payout(pack_id: str, body: RejectRequest):
+        s = get_service()
+        try:
+            return present(reject_payout_pack(s.store, pack_id, body.actor, body.reason))
+        except GateError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/payout-packs/{pack_id}/payout-file")
+    def payout_file_route(pack_id: str):
+        s = get_service()
+        found = s.store.payout_pack(pack_id)
+        if found is None:
+            raise HTTPException(404, f"no such payout pack: {pack_id}")
+        try:
+            return PlainTextResponse(payout_file(found), media_type="text/csv")
         except GateError as exc:
             raise HTTPException(409, str(exc)) from exc
 

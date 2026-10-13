@@ -132,6 +132,21 @@
     <p class="note">What the gate did with the model's proposals — graded by the approver's acts, not by anyone's say-so. An edit is a governed change to a proposed pack, recorded on the entry beside the original.</p>
     <div id="quality"></div>
     <div id="packs"></div>
+    <h3>Return premiums</h3>
+    <p class="note">The other direction of cash. A policy cancelled mid-term owes its unearned premium back: the return is computed pro-rata in code, shown on the cancellation record, and opened as a payable — to the insured, or to the broker who collected. Cash that later arrives for the cancelled policy nets against the payable first (it rides the day's posting pack as an offset). Payables are settled by payout packs at the same gate: no self-approval, and a pack above the single-approver limit needs a second approver. The system pays nothing — an approved pack yields a payout file a human hands to the bank.</p>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
+      <input type="text" id="cancel-policy" placeholder="Policy number (e.g. NSP-1003)" size="22">
+      <label>Effective <input type="date" id="cancel-effective"></label>
+      <input type="text" id="cancel-reason" placeholder="Reason (optional)" size="22">
+      <button id="cancel-go" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:#fff; color:var(--accent); cursor:pointer">Record cancellation (recorded by your name, on the day above)</button>
+      <span class="note" id="cancel-status"></span>
+    </div>
+    <div id="payables"></div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0">
+      <button id="payout-assemble" style="font:inherit; padding:7px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer">Assemble payout pack from open payables</button>
+      <span class="note">Value date is the day above; the assembler is your name. Each payable goes on at the amount standing.</span>
+    </div>
+    <div id="payoutpacks"></div>
   </section>
   <section id="tab-audit" class="hidden"><div id="audit"></div></section>
 </main>
@@ -421,8 +436,79 @@ async function editEntries(packId) {
     loadPacks();
   } catch (e) { setStatus("Edit refused: " + e.message); }
 }
+async function loadReturnPremiums() {
+  const view = await api("/api/payables");
+  $("payables").innerHTML = "<h4 style='margin:6px 0'>Payables — owed back</h4>" + table(
+    [{key: "payable_id", label: "Payable"}, {key: "policy_number", label: "Policy"},
+     {label: "Owed to", render: r => `${r.payee_kind}: ${r.payee_name}`},
+     {label: "Opened", num: 1, render: r => money(r.amount)},
+     {label: "Netted", num: 1, render: r => money(r.amount_netted)},
+     {label: "Paid", num: 1, render: r => money(r.amount_paid)},
+     {label: "Standing", num: 1, render: r => money(r.remaining)},
+     {key: "status", label: "Status"},
+     {label: "Chain", render: r => r.events.map(e => `${e.on} ${e.kind} ${money(e.amount)} (${e.ref})`).join(" → ")}],
+    view.payables);
+  const packs = await api("/api/payout-packs");
+  $("payoutpacks").innerHTML = packs.map(p => {
+    const actions = p.status === "proposed"
+      ? `<button onclick="payoutAct('${p.pack_id}','approve')">Approve</button>
+         <button class="ghost" onclick="payoutAct('${p.pack_id}','reject')" style="font:inherit;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer">Reject</button>`
+      : (p.status === "approved" ? `<a href="/api/payout-packs/${p.pack_id}/payout-file">payout file (CSV)</a>` : "");
+    return `<h4 style="margin:10px 0 4px">${p.pack_id} — ${p.value_date} — <span class="pill ${p.status === "approved" ? "ok" : ""}">${p.status}</span></h4>
+      <p class="note">Assembled by ${p.assembled_by}. Total ${money(p.entries.reduce((s, e) => s + Number(e.amount), 0))} across ${p.entries.length} payable(s). Approvals: ${p.approvals.join(", ") || "—"}</p>
+      <p>${actions}</p>` +
+      table([{key: "payable_id", label: "Payable"}, {key: "policy_number", label: "Policy"},
+             {label: "Payee", render: r => `${r.payee_kind}: ${r.payee_name}`},
+             {label: "Amount", num: 1, render: r => money(r.amount)}], p.entries);
+  }).join("") || "<p class='note'>No payout packs yet.</p>";
+}
+async function recordCancellation() {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — a cancellation is recorded by a named person.");
+  const policy = $("cancel-policy").value.trim();
+  const effective = $("cancel-effective").value || $("day").value;
+  try {
+    const cxl = await api(`/api/policies/${encodeURIComponent(policy)}/cancel`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({effective_date: effective, recorded_by: name, recorded_on: $("day").value, reason: $("cancel-reason").value.trim()})});
+    $("cancel-status").textContent = `Recorded: earned ${money(cxl.earned_premium)} of ${money(cxl.premium_total)}, paid ${money(cxl.paid_to_date)}, return premium ${money(cxl.return_premium)} owed to the ${cxl.payee_kind} (${cxl.payee_name}).`;
+    loadReturnPremiums().catch(() => {});
+  } catch (e) { $("cancel-status").textContent = "Cancellation refused: " + e.message; }
+}
+async function assemblePayouts() {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — a payout pack is assembled by a named person.");
+  const view = await api("/api/payables");
+  const proposed = new Set((await api("/api/payout-packs")).filter(p => p.status === "proposed").flatMap(p => p.entries.map(e => e.payable_id)));
+  const ids = view.payables.filter(p => p.status === "open" && Number(p.remaining) > 0 && !proposed.has(p.payable_id)).map(p => p.payable_id);
+  if (!ids.length) return setStatus("No open payables standing to assemble.");
+  try {
+    const pack = await api("/api/payout-packs", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({value_date: $("day").value, payable_ids: ids, assembled_by: name})});
+    setStatus(`${pack.pack_id} assembled by ${name} — it stops at the gate.`);
+    loadReturnPremiums().catch(() => {});
+  } catch (e) { setStatus("Payout pack refused: " + e.message); }
+}
+async function payoutAct(packId, kind) {
+  const name = $("actor").value.trim();
+  if (!name) return setStatus("Enter your name first — the gate is named, never anonymous.");
+  try {
+    if (kind === "approve") {
+      const second = prompt("Second approver (required when the pack exceeds the single-approver limit; leave empty otherwise):", "");
+      await api(`/api/payout-packs/${packId}/approve`, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({approver: name, second_approver: second || null})});
+    } else {
+      const reason = prompt("Reason for rejection (goes on the record):", "");
+      if (!reason) return;
+      await api(`/api/payout-packs/${packId}/reject`, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({actor: name, reason})});
+    }
+    setStatus(`${packId} ${kind === "approve" ? "approved" : "rejected"} by ${name}.`);
+    loadReturnPremiums().catch(() => {});
+  } catch (e) { setStatus("Gate refused: " + e.message); }
+}
 async function loadPacks() {
   loadQuality().catch(() => {});
+  loadReturnPremiums().catch(() => {});
   const packs = await api("/api/packs");
   $("packs").innerHTML = packs.map(p => {
     const alloc = p.entries.filter(e => e.kind === "allocation").reduce((s, e) => s + Number(e.allocation.amount), 0);
@@ -438,9 +524,9 @@ async function loadPacks() {
       <p>${actions}</p>` +
       table([{label: "#", render: (r, i) => i},
              {key: "kind", label: "Kind"},
-             {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.write_off_policy || "")},
-             {label: "Installment / detail", render: r => r.allocation ? r.allocation.installment_id : ("write-off " + (r.write_off_exception_id || ""))},
-             {label: "Amount", num: 1, render: r => money(r.allocation ? r.allocation.amount : r.write_off_amount)},
+             {label: "Policy", render: r => r.allocation ? r.allocation.policy_number : (r.payable_offset ? r.payable_offset.policy_number : (r.write_off_policy || ""))},
+             {label: "Installment / detail", render: r => r.allocation ? r.allocation.installment_id : (r.payable_offset ? ("netted against payable " + r.payable_offset.payable_id) : ("write-off " + (r.write_off_exception_id || "")))},
+             {label: "Amount", num: 1, render: r => money(r.allocation ? r.allocation.amount : (r.payable_offset ? r.payable_offset.amount : r.write_off_amount))},
              {label: "Tier", render: r => r.allocation ? (r.allocation.tier || "PROPOSED") + (r.auto_applied ? " · auto-appliable" : "") : ""},
              {label: "Proposal", render: r => r.proposal_kind ? `${r.proposal_kind.replace("_", " ")} · ${r.proposed_by || ""}` : "—"},
              {label: "Edits at the gate", render: r => (r.edits || []).length ? r.edits.map(e => `${e.before_policy}/${e.before_installment} ${money(e.before_amount)} → ${e.after_policy}/${e.after_installment} ${money(e.after_amount)} (by ${e.by})`).join("; ") : "—"}], p.entries);
@@ -473,6 +559,8 @@ async function loadAudit() {
 const loaders = {report: loadReport, import: () => Promise.resolve(), close: loadClose, scorecard: loadScorecard, exceptions: loadExceptions, suspense: loadSuspense, packs: loadPacks, audit: loadAudit};
 $("wb-filter").addEventListener("click", () => loadExceptions().catch(e => setStatus(e.message)));
 $("return-go").addEventListener("click", recordReturn);
+$("cancel-go").addEventListener("click", recordCancellation);
+$("payout-assemble").addEventListener("click", assemblePayouts);
 $("load-close").addEventListener("click", () => loadClose().catch(e => setStatus(e.message)));
 $("import-go").addEventListener("click", runImport);
 $("import-file").addEventListener("change", async (ev) => {
