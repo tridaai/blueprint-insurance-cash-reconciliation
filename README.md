@@ -26,12 +26,10 @@ to the accounting system) plus the audit record and a daily
 reconciliation report whose control totals must foot to the cent.
 
 The fictional carrier is **Northgate Specialty Insurance**, selling
-through eight brokers and a direct book. All policies, brokers, bank
-lines and people are synthetic.
+through eight brokers and a direct book.
 
-> Reference prototype. All policies, brokers, bank lines, remittance
-> documents and metrics are synthetic. Not connected to any real
-> carrier, bank, or accounting system.
+> Reference prototype. Not connected to any real carrier, bank, or
+> accounting system.
 
 <p align="center">
   <a href="https://trida.ai/blog/insurance-cash-reconciliation-agent-blueprint">
