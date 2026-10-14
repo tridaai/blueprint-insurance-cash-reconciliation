@@ -30,7 +30,7 @@ from .llm import make_reader
 from .nonpremium import non_premium_ledger
 from .objects import make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
-from .pipeline import DayRunError, ingest_dataset, run_day
+from .pipeline import DayRunError, ingest_dataset, run_day, seed_refusal
 from .rematch import rematch_suspense
 from .resolution import ResolutionError, assemble_resolution_pack, scan_candidates
 from .report import broker_scorecard, day_report, proposal_quality, return_premiums_view
@@ -82,6 +82,8 @@ def main() -> None:
     npl.add_argument("--month", help="YYYY-MM; default: all months")
     imp = sub.add_parser("import-statement", help="import a generic bank statement CSV")
     imp.add_argument("path", help="path to the statement CSV")
+    imp.add_argument("--date-order", choices=["DMY", "MDY"], default=None,
+                     help="how the bank writes numeric dates; needed only when no date in the file settles it")
     bsi = sub.add_parser("import-broker-statement", help="import a broker's own monthly statement CSV (control totals checked; refused whole on any mismatch)")
     bsi.add_argument("path", help="path to the broker statement CSV")
     bsr = sub.add_parser("broker-reconciliation", help="reconcile a broker's statement for a month against the books: every line classified, totals footing")
@@ -168,6 +170,9 @@ def main() -> None:
         as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
         print(json.dumps(today_view(store, as_of, policy), indent=2))
     elif args.command == "seed":
+        refusal = seed_refusal(store)
+        if refusal:
+            parser.exit(1, f"seed refused: {refusal}\n")
         ds = build_dataset()
         ingest_dataset(store, objects, ds)
         print(f"seeded: {len(ds.receivables)} policies, {len(ds.bank_lines)} bank lines, "
@@ -235,7 +240,8 @@ def main() -> None:
 
         try:
             report = import_statement(
-                store, Path(args.path).read_text(), source_name=Path(args.path).name
+                store, Path(args.path).read_text(), source_name=Path(args.path).name,
+                date_order=args.date_order,
             )
         except StatementImportError as exc:
             parser.exit(1, f"import refused: {exc}\n")

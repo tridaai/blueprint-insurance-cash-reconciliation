@@ -52,6 +52,7 @@ class ExceptionCode(str, Enum):
     STALE_SUSPENSE = "STALE_SUSPENSE"  # unapplied past the configured age
     INTENT_DIFFERS = "INTENT_DIFFERS"  # note indicated another installment; applied oldest-first
     CURRENCY_NO_OPEN_ITEMS = "CURRENCY_NO_OPEN_ITEMS"  # the payer has nothing open in this line's currency
+    REMITTANCE_UNREADABLE = "REMITTANCE_UNREADABLE"  # the reader could not produce a validated reading of the advice
 
 
 class PackStatus(str, Enum):
@@ -201,6 +202,10 @@ class Remittance(BaseModel):
     object_key: str | None = None  # where the document lives in S3
     lines: list[RemittanceLine] = Field(default_factory=list)  # after reading
     injection_flagged: bool = False
+    # The reader could not produce a reading that survived validation.
+    # The advice explains nothing until it is read again (the re-match
+    # pass retries it); its wire is held, never guessed at.
+    read_failed: bool = False
 
 
 # ---------------------------------------------------------------- outputs

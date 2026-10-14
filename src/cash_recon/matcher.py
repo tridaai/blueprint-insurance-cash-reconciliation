@@ -811,6 +811,24 @@ def _match_named(line, rec: Receivable, named, ctx, outcome) -> LineOutcome:
 
 
 def _match_remittance(line, rem: Remittance, ctx, outcome) -> LineOutcome:
+    if rem.read_failed:
+        # No validated reading exists, so the advice explains nothing
+        # yet. The wire is held whole — not reported as arithmetic
+        # that failed to foot, because nothing was read to foot.
+        outcome.record_attempt(
+            "T4_REMITTANCE", "refused",
+            f"Remittance {rem.remittance_id} could not be read into lines that "
+            "survive validation. Nothing allocated; the wire is held in suspense "
+            "(REMITTANCE_UNREADABLE).")
+        outcome.exceptions.append(
+            _exc(line, ExceptionCode.REMITTANCE_UNREADABLE, line.amount,
+                 f"Remittance {rem.remittance_id} could not be read: the reader's output "
+                 "failed validation. Nothing allocated; the wire is held in suspense "
+                 "until the advice is read (the re-match pass retries it) or worked by hand.",
+                 broker_id=rem.broker_id)
+        )
+        outcome.suspense_amount = line.amount
+        return _finish(line, outcome)
     lines_total = sum((l.amount for l in rem.lines), ZERO)
     problems: list[str] = []
     if rem.stated_total is not None and lines_total != rem.stated_total:

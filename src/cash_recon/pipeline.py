@@ -43,7 +43,7 @@ from langgraph.graph import END, StateGraph
 from . import combinations, documents, gate, nonpremium, webhooks
 from .config import Policy as PolicyConfig
 from .dataset import Dataset
-from .llm import OfflineReader
+from .llm import OfflineReader, ReaderError
 from .matcher import MatchContext, match_line
 from .models import AuditEvent, DayClaim, ExceptionCode, ExceptionRecord, SuspenseItem
 from .money import ZERO
@@ -79,6 +79,21 @@ def ingest_dataset(store: Store, objects: ObjectStore, dataset: Dataset) -> None
     store.audit(AuditEvent(at=_now(), actor="ingest", action="dataset_loaded", subject="northgate",
                            detail=f"{len(dataset.receivables)} policies, {len(dataset.bank_lines)} bank lines, "
                                   f"{len(dataset.remittances)} remittances"))
+
+
+def seed_refusal(store: Store) -> str | None:
+    """Why the synthetic month may not be seeded into this store, or
+    None when it may. Seeding upserts every receivable at its
+    synthetic opening balance, so over a book already in use it would
+    re-open installments that approved packs settled — the packs
+    would still read approved while the books said unpaid. Seeding is
+    for an empty store only."""
+    held = store.bank_lines()
+    if held:
+        return (f"the store already holds {len(held)} bank line(s): seeding again would "
+                "reset receivables that approved packs have settled. Seed an empty store "
+                "(a fresh SQLITE_PATH or database) instead.")
+    return None
 
 
 def ingest_november_dataset(store: Store, objects: ObjectStore, dataset) -> None:
@@ -138,6 +153,29 @@ def ingest_october_dataset(store: Store, objects: ObjectStore, dataset) -> None:
                                   f"{', '.join(sorted(dataset.renewals))}"))
 
 
+def _read_remittance(store: Store, rem, reader) -> str | None:
+    """Read one screened advice into lines. A reader that cannot
+    produce a reading that survives validation does not stop the
+    day: the advice is marked unread (its wire is held as
+    REMITTANCE_UNREADABLE by the matcher), the failure is audited,
+    and the note returned says so. Returns None on a clean read."""
+    try:
+        rem.lines = reader.read_remittance(rem.text)
+        rem.read_failed = False
+    except ReaderError as exc:
+        rem.lines = []
+        rem.read_failed = True
+        store.audit(AuditEvent(at=_now(), actor="reader", action="remittance_unreadable",
+                               subject=rem.remittance_id,
+                               detail=f"{reader.name}: {exc}. The advice explains nothing until "
+                                      "it is read again; its wire is held, not guessed at."))
+        log.warning("remittance %s unreadable via %s: %s", rem.remittance_id, reader.name, exc)
+        return f"{rem.remittance_id}: could not be read ({exc}); its wire is held in suspense"
+    if rem.stated_total is None:
+        rem.stated_total = OfflineReader().stated_total(rem.text)
+    return None
+
+
 def prepare_remittances(store: Store, reader, upto: date) -> int:
     """Screen and read every remittance received on or before `upto`
     that no day run has processed yet — a stored embedding is the
@@ -168,11 +206,17 @@ def prepare_remittances(store: Store, reader, upto: date) -> int:
             store.audit(AuditEvent(at=_now(), actor="document_screen", action="near_duplicate_flagged",
                                    subject=rem.remittance_id,
                                    detail=f"Near-duplicate of {duplicate_of}; flagged for a human, not dropped."))
-        rem.lines = reader.read_remittance(rem.text)
-        if rem.stated_total is None:
-            rem.stated_total = OfflineReader().stated_total(rem.text)
+        _read_remittance(store, rem, reader)
         store.save_remittance(rem)
         prepared += 1
+    # An advice whose earlier reading failed is already screened; it
+    # is read again here, so a recovered reader (or a corrected
+    # validator) can still explain the held wire.
+    for rem in store.remittances():
+        if rem.read_failed and rem.received_date <= upto:
+            if _read_remittance(store, rem, reader) is None:
+                prepared += 1
+            store.save_remittance(rem)
     return prepared
 
 
@@ -215,13 +259,15 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
 
     def read(state: DayState) -> DayState:
         day = date.fromisoformat(state["day"])
+        notes = list(state.get("document_notes") or [])
         for rem in store.remittances(on=day):
-            rem.lines = reader.read_remittance(rem.text)
-            if rem.stated_total is None:
-                rem.stated_total = OfflineReader().stated_total(rem.text)
+            failed = _read_remittance(store, rem, reader)
             store.save_remittance(rem)
-            log.info("read remittance %s: %d lines via %s", rem.remittance_id, len(rem.lines), reader.name)
-        return {}
+            if failed:
+                notes.append(failed)
+            else:
+                log.info("read remittance %s: %d lines via %s", rem.remittance_id, len(rem.lines), reader.name)
+        return {"document_notes": notes}
 
     def match(state: DayState) -> DayState:
         day = date.fromisoformat(state["day"])
@@ -246,10 +292,18 @@ def build_graph(store: Store, objects: ObjectStore, reader, policy: PolicyConfig
                                           "config: not premium cash, routed to a disposition "
                                           "pack at the gate; never matched, never in suspense."))
             log.info("classified %s as non-premium %s", line.bank_line_id, kind)
+        # Cash already claimed by a bill: allocated in an approved pack,
+        # or proposed in an earlier day's pack still waiting at the
+        # gate. Approval lags (Friday's pack decided on Monday), and a
+        # second copy of the same payment must be caught as a
+        # duplicate whether or not the first copy's pack is decided
+        # yet. Rejected packs free their cash; the run's own day is
+        # excluded, since its lines are added below as they settle.
         settled = {
             entry.allocation.bank_line_id
             for pack in store.packs()
             if pack.status.value == "approved"
+            or (pack.status.value == "proposed" and pack.value_date < day)
             for entry in pack.entries
             if entry.allocation
         }

@@ -162,11 +162,13 @@ def test_retarget_edit_counts_the_redirected_value():
     pack = store.pack(pack_id)
     idx = {e.allocation.policy_number: i for i, e in enumerate(pack.entries)}
     # Redirect NSP-2001's whole allocation onto NSP-2002's second
-    # installment — first give NSP-2002 a second installment to aim at.
+    # installment — first give NSP-2002 a second installment to aim at,
+    # one that can absorb the redirected cash (the gate refuses cash an
+    # installment cannot take, rather than letting the excess vanish).
     rec = store.receivable("NSP-2002")
     rec.installments.append(Installment(
         installment_id="NSP-2002-I2", policy_number="NSP-2002", sequence=2,
-        due_date=date(2026, 10, 1), amount_due=D("500.00")))
+        due_date=date(2026, 10, 1), amount_due=D("2000.00")))
     store.upsert_receivable(rec)
     gate.edit_pack_entries(store, pack_id, CONTROLLER, [
         {"entry_index": idx["NSP-2001"], "new_policy": "NSP-2002", "new_installment": "NSP-2002-I2"},

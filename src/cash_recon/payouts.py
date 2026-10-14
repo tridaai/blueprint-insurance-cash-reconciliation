@@ -26,7 +26,7 @@ from datetime import date, datetime, timezone
 
 from . import webhooks
 from .config import Policy as PolicyConfig
-from .gate import GateError
+from .gate import GateError, decision_lock, person_name, same_person
 from .models import AuditEvent, PayableEvent, PayoutEntry, PayoutPack
 from .money import ZERO, as_str
 from .store import Store
@@ -100,7 +100,7 @@ def assemble_payout_pack(store: Store, day: date, payable_ids: list[str],
     return pack
 
 
-def approve_payout_pack(store: Store, pack_id: str, approver: str,
+def _approve_payout_pack(store: Store, pack_id: str, approver: str,
                         policy: PolicyConfig,
                         second_approver: str | None = None) -> PayoutPack:
     """Approve a payout pack and settle its payables. The rules are
@@ -112,15 +112,19 @@ def approve_payout_pack(store: Store, pack_id: str, approver: str,
         raise GateError(f"no such payout pack: {pack_id}")
     if pack.status.value != "proposed":
         raise GateError(f"payout pack {pack_id} is {pack.status.value}; only a proposed pack can be approved")
-    if not approver or approver == pack.assembled_by:
+    if not person_name(approver):
+        raise GateError("an approval must name the approver")
+    if same_person(approver, pack.assembled_by):
         raise GateError("self-approval refused: the approver must differ from the assembler")
+    approver = person_name(approver)
+    second_approver = person_name(second_approver) or None
     if pack.total > policy.write_off_single_limit:
         if not second_approver:
             raise GateError(
                 f"payouts of {pack.total} exceed the single-approver limit "
                 f"{policy.write_off_single_limit}; a second approver is required"
             )
-        if second_approver in (approver, pack.assembled_by):
+        if same_person(second_approver, approver) or same_person(second_approver, pack.assembled_by):
             raise GateError("the second approver must differ from the approver and the assembler")
 
     payables = {}
@@ -164,14 +168,15 @@ def approve_payout_pack(store: Store, pack_id: str, approver: str,
     return pack
 
 
-def reject_payout_pack(store: Store, pack_id: str, actor: str, reason: str) -> PayoutPack:
+def _reject_payout_pack(store: Store, pack_id: str, actor: str, reason: str) -> PayoutPack:
     pack = store.payout_pack(pack_id)
     if pack is None:
         raise GateError(f"no such payout pack: {pack_id}")
     if pack.status.value != "proposed":
         raise GateError(f"payout pack {pack_id} is {pack.status.value}; only a proposed pack can be rejected")
-    if not actor or actor == pack.assembled_by:
+    if not person_name(actor) or same_person(actor, pack.assembled_by):
         raise GateError("rejection must come from someone other than the assembler")
+    actor = person_name(actor)
     if not reason.strip():
         raise GateError("a rejection needs a reason on the record")
     pack.status = pack.status.REJECTED
@@ -201,3 +206,22 @@ def payout_file(pack: PayoutPack) -> str:
                          entry.policy_number, entry.payee_kind, entry.payee_name,
                          f"{entry.amount:.2f}", ";".join(pack.approvals)])
     return buf.getvalue()
+
+
+# Payout decisions take the same gate lock as posting packs: one
+# decision at a time, so a payable is never paid twice by two
+# approvers clicking together.
+
+
+def approve_payout_pack(store: Store, pack_id: str, approver: str,
+                        policy: PolicyConfig,
+                        second_approver: str | None = None) -> PayoutPack:
+    with decision_lock(store):
+        return _approve_payout_pack(store, pack_id, approver, policy, second_approver)
+approve_payout_pack.__doc__ = _approve_payout_pack.__doc__
+
+
+def reject_payout_pack(store: Store, pack_id: str, actor: str, reason: str) -> PayoutPack:
+    with decision_lock(store):
+        return _reject_payout_pack(store, pack_id, actor, reason)
+reject_payout_pack.__doc__ = _reject_payout_pack.__doc__

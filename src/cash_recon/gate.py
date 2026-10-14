@@ -25,6 +25,7 @@ report, still auditable. Nothing is hidden by being small.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 from datetime import datetime, timezone
@@ -53,6 +54,20 @@ class GateError(RuntimeError):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def person_name(name: str | None) -> str:
+    """A person's name as the gate records it: surrounding and
+    repeated whitespace collapsed. Empty when nobody is named."""
+    return " ".join((name or "").split())
+
+
+def same_person(a: str | None, b: str | None) -> bool:
+    """Whether two names name the same person, for the gate's
+    separation-of-duties rules. Case and spacing are presentation:
+    " priya nair " approving what "Priya Nair" assembled is still
+    self-approval."""
+    return person_name(a).casefold() == person_name(b).casefold()
 
 
 def _proposal_kind(alloc: Allocation) -> str | None:
@@ -85,7 +100,7 @@ def assemble_pack(day, outcomes: list[LineOutcome], assembled_by: str, policy: P
     return pack
 
 
-def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) -> PostingPack:
+def _edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) -> PostingPack:
     """Edit a PROPOSED pack's allocation entries at the gate, before
     approval — the approver's correction of a proposal, on the
     record. Each adjustment names an entry (by its index in the
@@ -110,8 +125,9 @@ def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) 
         raise GateError(f"no such pack: {pack_id}")
     if pack.status.value != "proposed":
         raise GateError(f"pack {pack_id} is {pack.status.value}; only a proposed pack can be edited")
-    if not actor or actor == pack.assembled_by:
+    if not person_name(actor) or same_person(actor, pack.assembled_by):
         raise GateError("pack entries are edited by a named approver-side person, not the assembler")
+    actor = person_name(actor)
     if any(e.combination_id for e in pack.entries):
         raise GateError(
             "a combination settlement is edited by nobody: its legs settle "
@@ -210,7 +226,7 @@ def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) 
     return pack
 
 
-def add_write_off(store, pack_id: str, exception_id: str, actor: str) -> PostingPack:
+def _add_write_off(store, pack_id: str, exception_id: str, actor: str) -> PostingPack:
     """Attach a delta write-off (a PARTIAL or NETTING_MISMATCH
     shortfall) to a proposed pack. Deciding it still takes the gate."""
     pack = store.pack(pack_id)
@@ -245,7 +261,7 @@ def add_write_off(store, pack_id: str, exception_id: str, actor: str) -> Posting
     return pack
 
 
-def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
+def _approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
                  second_approver: str | None = None,
                  choice: str | None = None) -> PostingPack:
     """The human gate. Self-approval is refused; write-offs above
@@ -278,8 +294,12 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
         raise GateError(f"no such pack: {pack_id}")
     if pack.status.value != "proposed":
         raise GateError(f"pack {pack_id} is {pack.status.value}; only a proposed pack can be approved")
-    if not approver or approver == pack.assembled_by:
+    if not person_name(approver):
+        raise GateError("an approval must name the approver")
+    if same_person(approver, pack.assembled_by):
         raise GateError("self-approval refused: the approver must differ from the assembler")
+    approver = person_name(approver)
+    second_approver = person_name(second_approver) or None
     if pack.disposition is not None:
         # Dual control, always: a disposition takes cash off the
         # desk's open work without settling a policy, so no single
@@ -293,12 +313,12 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
                 "and always needs a second approver, whatever the "
                 "amounts — one person never disposes of cash alone"
             )
-        if second_approver == approver:
+        if same_person(second_approver, approver):
             raise GateError(
                 "the second approver of a disposition must differ "
                 "from the approver: two people, two decisions"
             )
-        if second_approver == pack.assembled_by:
+        if same_person(second_approver, pack.assembled_by):
             raise GateError(
                 "the assembler of a disposition pack can be neither "
                 "approver: the second approver must differ from the "
@@ -310,7 +330,7 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
                 f"write-offs of {pack.write_off_total} exceed the single-approver limit "
                 f"{policy.write_off_single_limit}; a second approver is required"
             )
-        if second_approver in (approver, pack.assembled_by):
+        if same_person(second_approver, approver) or same_person(second_approver, pack.assembled_by):
             raise GateError("the second approver must differ from the approver and the assembler")
 
     # Resolution packs: the choice is validated before anything is
@@ -463,6 +483,49 @@ def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
                     "since the pack was assembled — the pack is refused "
                     "whole; reject it and propose the dispositions again"
                 )
+    # Ordinary allocations are re-verified against the books as they
+    # stand, as combinations and resolutions are above: the matcher
+    # proposed each against the installment's balance on the day it
+    # ran, and another pack approved since may already have settled
+    # it (two packs carrying the same payment while approval lagged).
+    # The application is replayed on copies, at the rates it will
+    # apply at, and cash an installment can no longer absorb refuses
+    # the pack whole — before anything is written.
+    if pack.resolution is None:
+        sim_brokers = {b.broker_id: b for b in store.brokers()}
+        sim: dict[str, object] = {}
+        for entry in pack.entries:
+            if entry.kind != "allocation" or not entry.allocation or entry.combination_id:
+                continue
+            alloc = entry.allocation
+            if alloc.policy_number not in sim:
+                rec = store.receivable(alloc.policy_number)
+                if rec is None:
+                    raise GateError(
+                        f"pack {pack_id} applies {alloc.amount} to {alloc.policy_number}, "
+                        "which is no longer on the books; the pack is refused whole")
+                sim[alloc.policy_number] = rec.model_copy(deep=True)
+            rec = sim[alloc.policy_number]
+            inst = next((i for i in rec.installments
+                         if i.installment_id == alloc.installment_id), None)
+            if inst is None:
+                raise GateError(
+                    f"pack {pack_id} applies {alloc.amount} to {alloc.installment_id}, "
+                    "which is no longer on the books; the pack is refused whole")
+            rate = sim_brokers[rec.broker_id].rate_on(pack.value_date) if rec.broker_id else None
+            # The ceiling is the installment's gross open balance: an
+            # insured may pay a broker policy's premium gross, direct,
+            # and broker cash net of commission is always below it. A
+            # settled installment can take nothing.
+            can_take = inst.open_balance
+            if alloc.amount > can_take:
+                raise GateError(
+                    f"pack {pack_id} applies {alloc.amount} from {alloc.bank_line_id} to "
+                    f"{alloc.installment_id} of {alloc.policy_number}, which can take only "
+                    f"{can_take} in cash as the books now stand — it was settled since the "
+                    "pack was assembled (is this the same payment twice?); the pack is "
+                    "refused whole: reject it, and the line is worked again by the re-match pass")
+            _apply(rec, inst, alloc, rate)
 
     pack.approvals = [approver] + ([second_approver] if second_approver else [])
     pack.status = pack.status.APPROVED
@@ -662,14 +725,15 @@ def _apply(rec, inst, alloc: Allocation, rate: Decimal | None) -> None:
         inst.status = InstallmentStatus.PARTIALLY_APPLIED
 
 
-def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
+def _reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
     pack = store.pack(pack_id)
     if pack is None:
         raise GateError(f"no such pack: {pack_id}")
     if pack.status.value != "proposed":
         raise GateError(f"pack {pack_id} is {pack.status.value}; only a proposed pack can be rejected")
-    if not actor or actor == pack.assembled_by:
+    if not person_name(actor) or same_person(actor, pack.assembled_by):
         raise GateError("rejection must come from someone other than the assembler")
+    actor = person_name(actor)
     if not reason.strip():
         raise GateError("a rejection needs a reason on the record")
     pack.status = pack.status.REJECTED
@@ -804,3 +868,42 @@ def posting_file(pack: PostingPack) -> str:
                              f"{entry.write_off_amount:.2f}", "", ";".join(pack.approvals),
                              "", "", ""])
     return buf.getvalue()
+
+
+# -- one decision at a time ----------------------------------------------------
+# Every act that decides or changes a pack runs under the store's gate
+# lock. Two people clicking at the same moment then decide one after
+# the other: the second re-reads the pack and finds it already decided
+# (approved twice, or approved and rejected at once, would otherwise
+# both pass the "still proposed" check and apply the cash twice).
+
+
+def decision_lock(store):
+    lock = getattr(store, "gate_lock", None)
+    return lock() if lock is not None else contextlib.nullcontext()
+
+
+def edit_pack_entries(store, pack_id: str, actor: str, adjustments: list[dict]) -> PostingPack:
+    with decision_lock(store):
+        return _edit_pack_entries(store, pack_id, actor, adjustments)
+edit_pack_entries.__doc__ = _edit_pack_entries.__doc__
+
+
+def add_write_off(store, pack_id: str, exception_id: str, actor: str) -> PostingPack:
+    with decision_lock(store):
+        return _add_write_off(store, pack_id, exception_id, actor)
+add_write_off.__doc__ = _add_write_off.__doc__
+
+
+def approve_pack(store, pack_id: str, approver: str, policy: PolicyConfig,
+                 second_approver: str | None = None,
+                 choice: str | None = None) -> PostingPack:
+    with decision_lock(store):
+        return _approve_pack(store, pack_id, approver, policy, second_approver, choice)
+approve_pack.__doc__ = _approve_pack.__doc__
+
+
+def reject_pack(store, pack_id: str, actor: str, reason: str) -> PostingPack:
+    with decision_lock(store):
+        return _reject_pack(store, pack_id, actor, reason)
+reject_pack.__doc__ = _reject_pack.__doc__

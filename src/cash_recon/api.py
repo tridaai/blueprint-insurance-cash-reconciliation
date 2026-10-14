@@ -45,7 +45,7 @@ from .logging_setup import configure_logging, new_request_id
 from .nonpremium import non_premium_ledger
 from .objects import ObjectStore, make_object_store
 from .payouts import approve_payout_pack, assemble_payout_pack, payout_file, reject_payout_pack
-from .pipeline import DayRunError, ingest_dataset, run_day
+from .pipeline import DayRunError, ingest_dataset, run_day, seed_refusal
 from .rematch import rematch_suspense
 from .resolution import ResolutionError, assemble_resolution_pack, scan_candidates
 from .returns import ReturnError, line_history, record_return
@@ -106,6 +106,9 @@ class DispositionAssembleRequest(BaseModel):
 class StatementImportRequest(BaseModel):
     text: str
     source_name: str = "statement"
+    # How the bank writes numeric dates ("DMY" or "MDY"); needed only
+    # when no date in the file settles it.
+    date_order: str | None = None
 
 
 class EntryAdjustment(BaseModel):
@@ -238,6 +241,9 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.post("/api/seed")
     def seed():
         s = get_service()
+        refusal = seed_refusal(s.store)
+        if refusal:
+            raise HTTPException(409, f"seed refused: {refusal}")
         ds = build_dataset()
         ingest_dataset(s.store, s.objects, ds)
         return {
@@ -270,7 +276,7 @@ def create_app(service: Service | None = None) -> FastAPI:
     def import_stmt(body: StatementImportRequest):
         s = get_service()
         try:
-            return import_statement(s.store, body.text, body.source_name)
+            return import_statement(s.store, body.text, body.source_name, body.date_order)
         except StatementImportError as exc:
             raise HTTPException(422, str(exc)) from exc
 

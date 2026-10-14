@@ -39,10 +39,18 @@ flock on a file beside the SQLite database, a threading lock in
 memory — so a starter can tell a live attempt from a dead one:
 the lock frees itself when the holder's process dies, while the
 claim record stays as the day's standing history.
+
+Gate decisions carry the last contract: `gate_lock()` is held while
+a pack is approved, rejected, edited or given a write-off, so two
+people deciding at the same moment decide one after the other — the
+second re-reads the pack and finds it already decided. A blocking
+Postgres advisory lock on its own connection, an flock beside the
+SQLite database, a re-entrant lock in memory.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -147,6 +155,7 @@ class Store(Protocol):
     def save_day_claim(self, claim: DayClaim) -> None: ...
     def try_day_lock(self, day: date) -> bool: ...
     def release_day_lock(self, day: date) -> None: ...
+    def gate_lock(self) -> contextlib.AbstractContextManager: ...
     def add_remittance(self, rem: Remittance) -> None: ...
     def save_remittance(self, rem: Remittance) -> None: ...
     def remittances(self, on: date | None = None) -> list[Remittance]: ...
@@ -203,6 +212,7 @@ class InMemoryStore:
         self._day_claims: dict[date, DayClaim] = {}
         self._claim_guard = threading.Lock()
         self._day_locks: dict[date, threading.Lock] = {}
+        self._gate_guard = threading.RLock()
 
     # -- reference data -------------------------------------------------
     def upsert_broker(self, broker):
@@ -304,6 +314,11 @@ class InMemoryStore:
             lock = self._day_locks.get(day)
         if lock is not None and lock.locked():
             lock.release()
+
+    @contextlib.contextmanager
+    def gate_lock(self):
+        with self._gate_guard:
+            yield
 
     def add_remittance(self, rem):
         self._remittances[rem.remittance_id] = copy.deepcopy(rem)
@@ -463,6 +478,13 @@ class PostgresStore:
         self._lock_conn = None
         self._held_day_locks: set[str] = set()
         self._lock_guard = threading.Lock()
+        # Gate decisions serialise across every process on the
+        # database: a blocking advisory lock on a connection of its
+        # own (so a waiting approver never stalls the day-run lock),
+        # entered once per thread-nesting under a re-entrant guard.
+        self._gate_conn = None
+        self._gate_guard = threading.RLock()
+        self._gate_depth = 0
         base = Path(migrations_dir) if migrations_dir else _default_migrations_dir()
         self._migrate(base)
 
@@ -679,6 +701,24 @@ class PostgresStore:
                 # The unlock is best-effort: if the connection is
                 # gone, the session ended and the lock went with it.
                 pass
+
+    @contextlib.contextmanager
+    def gate_lock(self):
+        with self._gate_guard:
+            if self._gate_depth == 0:
+                if self._gate_conn is None or self._gate_conn.closed:
+                    self._gate_conn = self._psycopg.connect(self._dsn, autocommit=True)
+                self._gate_conn.execute("SELECT pg_advisory_lock(hashtext('cashrecon-gate'))")
+            self._gate_depth += 1
+            try:
+                yield
+            finally:
+                self._gate_depth -= 1
+                if self._gate_depth == 0:
+                    try:
+                        self._gate_conn.execute("SELECT pg_advisory_unlock(hashtext('cashrecon-gate'))")
+                    except Exception:
+                        pass  # session gone: the lock went with it
 
     def add_remittance(self, rem):
         self._put(
@@ -914,6 +954,9 @@ class SqliteStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._day_lock_fds: dict[str, int] = {}
+        self._gate_guard = threading.RLock()
+        self._gate_depth = 0
+        self._gate_fd: int | None = None
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         base = Path(migrations_dir) if migrations_dir else _default_migrations_dir("sqlite")
@@ -1117,6 +1160,27 @@ class SqliteStore:
             (claim.day.isoformat(), claim.attempt, claim.actor,
              claim.state, dump(claim)),
         )
+
+    @contextlib.contextmanager
+    def gate_lock(self):
+        import fcntl
+
+        with self._gate_guard:
+            if self._gate_depth == 0:
+                self._gate_fd = os.open(self.path.parent / f"{self.path.name}.gatelock",
+                                        os.O_CREAT | os.O_RDWR, 0o644)
+                fcntl.flock(self._gate_fd, fcntl.LOCK_EX)
+            self._gate_depth += 1
+            try:
+                yield
+            finally:
+                self._gate_depth -= 1
+                if self._gate_depth == 0:
+                    try:
+                        fcntl.flock(self._gate_fd, fcntl.LOCK_UN)
+                    finally:
+                        os.close(self._gate_fd)
+                        self._gate_fd = None
 
     def _day_lock_path(self, day) -> Path:
         return self.path.parent / f"{self.path.name}.daylock-{day.isoformat()}"

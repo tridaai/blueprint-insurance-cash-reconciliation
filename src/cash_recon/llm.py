@@ -122,7 +122,11 @@ class LLMReader:
         raw = self._ask(prompt, text)
         lines = self._validate_lines(raw, text)
         if lines is None:
-            raw = self._ask(prompt + "\nYour previous reply was not valid JSON in the required shape. Reply again, JSON only.", text)
+            raw = self._ask(
+                prompt + "\nYour previous reply failed validation. Reply again, JSON only, "
+                "in exactly the shape above: every policy_number in the form NSP-NNNN, "
+                "every amount a positive number, and every citation copied character "
+                "for character from one line of the document.", text)
             lines = self._validate_lines(raw, text)
         if lines is None:
             raise ReaderError("remittance reading failed validation twice")
@@ -136,7 +140,7 @@ class LLMReader:
                 number = str(item["policy_number"])
                 if not POLICY_RE.fullmatch(number):
                     return None
-                amount = cents(Decimal(str(item["amount"])))
+                amount = _model_amount(item["amount"])
                 if amount <= 0:
                     return None
                 citation = str(item.get("citation", ""))
@@ -164,7 +168,10 @@ class LLMReader:
             '"installment_id": "...", "amount": "0.00"}], "reasoning": '
             '"<why this combination>", "rejected": ["<alternative you ruled out>"]}'
         )
-        raw = self._ask(prompt, listing)
+        try:
+            raw = self._ask(prompt, listing)
+        except ReaderError:
+            return None  # no proposal: the wire stays with the desk, honestly
         proposal = self._validate_proposal(raw, amount, candidates)
         if proposal is None:
             return None
@@ -181,7 +188,7 @@ class LLMReader:
                 key = (str(item["policy_number"]), str(item["installment_id"]))
                 if key not in by_key:
                     return None  # invented an item: not a proposal, a guess
-                alloc_amount = cents(Decimal(str(item["amount"])))
+                alloc_amount = _model_amount(item["amount"])
                 if alloc_amount <= 0 or alloc_amount > by_key[key].cash_due:
                     return None
                 total += alloc_amount
@@ -274,15 +281,29 @@ class LLMReader:
             f"Expected net remittance: {expected}\nReceived: {received}\n"
             f"Difference: {expected - received}"
         )
-        return self._ask(prompt, body).strip()
+        try:
+            return self._ask(prompt, body).strip()
+        except ReaderError:
+            # The query note is a convenience; the deterministic draft
+            # says the same facts, so an outage costs nothing here.
+            return OfflineReader().draft_broker_note(broker_name, policy_number, expected, received)
 
     def _ask(self, system: str, body: str) -> str:
-        return self._chat(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": f"~~~\n{body}\n~~~"},
-            ]
-        )
+        # A provider that cannot be reached — down, refusing, timing
+        # out, answering with an error or with nothing parseable — is
+        # a reader that could not read, not a reason to stop the day:
+        # every caller already knows what "no reading" means.
+        try:
+            return self._chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"~~~\n{body}\n~~~"},
+                ]
+            )
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ReaderError(
+                f"model provider unreachable or unusable ({self.label}): "
+                f"{type(exc).__name__}: {exc}") from exc
 
 
 def _json_span(raw: str) -> str:
@@ -290,6 +311,18 @@ def _json_span(raw: str) -> str:
     if start == -1 or end == -1:
         raise ValueError("no JSON object in reply")
     return raw[start : end + 1]
+
+
+def _model_amount(value) -> Decimal:
+    """An amount as a model wrote it. Models copy figures the way the
+    document prints them — "19,425.00", "$2,500.00" — so thousands
+    separators and a leading currency symbol are presentation, not a
+    different number. Anything else that does not parse still fails
+    validation."""
+    text = str(value).strip().replace(",", "")
+    if text[:1] in ("$", "£", "€"):
+        text = text[1:].strip()
+    return cents(Decimal(text))
 
 
 # ------------------------------------------------------------------- offline

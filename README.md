@@ -374,7 +374,10 @@ Each carries a reason code, the amount at issue, and an aging clock:
 `REMITTANCE_ARITHMETIC`, `UNKNOWN_POLICY`, `CANCELLED_POLICY`,
 `DUPLICATE_PAYMENT`, `CURRENCY_NO_OPEN_ITEMS` (the payer has
 nothing open in the currency the cash arrived in — see
-*Multi-currency cash application*), and `STALE_SUSPENSE` for unapplied cash past the
+*Multi-currency cash application*), `REMITTANCE_UNREADABLE` (the reader
+could not produce a reading of the advice that survives validation:
+the wire is held whole, the day run carries on, and the re-match pass
+reads the advice again), and `STALE_SUSPENSE` for unapplied cash past the
 configured age. For a netting mismatch the system drafts the broker
 query note — what was expected, what arrived, the delta. Drafted,
 never sent.
