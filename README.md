@@ -33,7 +33,13 @@ lines and people are synthetic.
 > documents and metrics are synthetic. Not connected to any real
 > carrier, bank, or accounting system.
 
-> **Work in progress** — this blueprint is built and passing its automated test and eval gates, but it has not yet finished hands-on local testing, and its companion blog post is not yet published. Expect changes. This notice comes off when both are done.
+<p align="center">
+  <a href="https://trida.ai/blog/insurance-cash-reconciliation-agent-blueprint">
+    <img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1791999376201-cover.webp" alt="Insurance Cash Reconciliation Agent Blueprint" width="600">
+  </a>
+</p>
+
+**Deep-dive:** [Insurance Cash Reconciliation Agent Blueprint](https://trida.ai/blog/insurance-cash-reconciliation-agent-blueprint) — how the agent works, where it stops, and what the evals actually prove.
 
 ## Run it with a real model
 
